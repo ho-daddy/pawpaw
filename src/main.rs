@@ -106,8 +106,11 @@ fn run_app<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| ui::draw::draw(f, app))?;
 
-        // For AI screen, use polling to allow async response updates
-        let poll_timeout = if app.current_screen == Screen::AIScreen {
+        // For AI screen or FileInfo with calculation, use fast polling for spinner animation
+        let is_file_info_calculating = app.current_screen == Screen::FileInfo
+            && app.file_info_state.as_ref().map(|s| s.is_calculating).unwrap_or(false);
+
+        let poll_timeout = if app.current_screen == Screen::AIScreen || is_file_info_calculating {
             Duration::from_millis(100) // Fast polling for spinner animation
         } else {
             Duration::from_millis(250)
@@ -117,6 +120,13 @@ fn run_app<B: ratatui::backend::Backend>(
         if app.current_screen == Screen::AIScreen {
             if let Some(ref mut state) = app.ai_state {
                 state.poll_response();
+            }
+        }
+
+        // Poll for file info calculation if on FileInfo screen
+        if app.current_screen == Screen::FileInfo {
+            if let Some(ref mut state) = app.file_info_state {
+                state.poll();
             }
         }
 

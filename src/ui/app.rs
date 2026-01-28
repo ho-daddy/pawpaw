@@ -6,6 +6,7 @@ use chrono::{DateTime, Local};
 use crate::services::file_ops;
 use crate::ui::file_viewer::ViewerState;
 use crate::ui::file_editor::EditorState;
+use crate::ui::file_info::FileInfoState;
 
 /// Get a valid directory path, falling back to parent directories if needed
 pub fn get_valid_path(target_path: &Path, fallback: &Path) -> PathBuf {
@@ -294,6 +295,7 @@ pub struct App {
 
     // File info state
     pub info_file_path: PathBuf,
+    pub file_info_state: Option<FileInfoState>,
 
     // Process manager state
     pub processes: Vec<crate::services::process::ProcessInfo>,
@@ -358,6 +360,7 @@ impl App {
             editor_file_path: PathBuf::new(),
 
             info_file_path: PathBuf::new(),
+            file_info_state: None,
 
             processes: Vec::new(),
             process_selected_index: 0,
@@ -567,15 +570,37 @@ impl App {
     }
 
     pub fn show_file_info(&mut self) {
-        let panel = self.active_panel();
-        if let Some(file) = panel.current_file() {
-            if file.name != ".." {
-                self.info_file_path = panel.path.join(&file.name);
-                self.current_screen = Screen::FileInfo;
+        // Clone necessary data first to avoid borrow issues
+        let (file_path, is_directory, is_dotdot) = {
+            let panel = self.active_panel();
+            if let Some(file) = panel.current_file() {
+                (
+                    panel.path.join(&file.name),
+                    file.is_directory,
+                    file.name == "..",
+                )
             } else {
-                self.show_message("Select a file for info");
+                return;
             }
+        };
+
+        if is_dotdot {
+            self.show_message("Select a file for info");
+            return;
         }
+
+        self.info_file_path = file_path.clone();
+
+        // For directories, start async size calculation
+        if is_directory {
+            let mut state = FileInfoState::new();
+            state.start_calculation(&file_path);
+            self.file_info_state = Some(state);
+        } else {
+            self.file_info_state = None;
+        }
+
+        self.current_screen = Screen::FileInfo;
     }
 
     pub fn view_file(&mut self) {
