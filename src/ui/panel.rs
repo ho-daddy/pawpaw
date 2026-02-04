@@ -144,6 +144,8 @@ pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bo
         let paragraph = if show_cursor {
             let cursor_bg = if is_marked {
                 theme.panel.marked_text
+            } else if file.is_symlink {
+                theme.panel.symlink_text
             } else if file.is_directory {
                 theme.panel.directory_text
             } else {
@@ -326,7 +328,9 @@ fn create_file_line(
     theme: &Theme,
 ) -> Line<'static> {
     let marker = if is_marked { "✻" } else { " " };
-    let icon = if file.is_directory {
+    let icon = if file.is_symlink {
+        theme.chars.symlink.to_string()
+    } else if file.is_directory {
         theme.chars.folder.to_string()
     } else {
         theme.chars.file.to_string()
@@ -406,6 +410,8 @@ fn create_file_line(
     let name_style = if is_cursor {
         let cursor_bg = if is_marked {
             theme.panel.marked_text
+        } else if file.is_symlink {
+            theme.panel.symlink_text
         } else if file.is_directory {
             theme.panel.directory_text
         } else {
@@ -416,6 +422,8 @@ fn create_file_line(
             .bg(cursor_bg)
     } else if is_marked {
         theme.marked_style()
+    } else if file.is_symlink {
+        theme.symlink_style()
     } else if file.is_directory {
         theme.directory_style()
     } else {
@@ -425,6 +433,8 @@ fn create_file_line(
     let other_style = if is_cursor {
         let cursor_bg = if is_marked {
             theme.panel.marked_text
+        } else if file.is_symlink {
+            theme.panel.symlink_text
         } else if file.is_directory {
             theme.panel.directory_text
         } else {

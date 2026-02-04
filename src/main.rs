@@ -578,7 +578,7 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
         }
     }
 
-    // Shift+방향키: 선택하면서 이동
+    // Shift+방향키: 선택하면서 이동, Shift+V: 붙여넣기 (Windows 호환)
     if modifiers.contains(KeyModifiers::SHIFT) {
         match code {
             KeyCode::Up => {
@@ -587,6 +587,10 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             }
             KeyCode::Down => {
                 app.move_cursor_with_selection(1);
+                return false;
+            }
+            KeyCode::Char('V') | KeyCode::Char('v') => {
+                app.clipboard_paste();
                 return false;
             }
             _ => {}

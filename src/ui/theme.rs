@@ -10,6 +10,7 @@ use supports_color::Stream;
 pub struct ThemeChars {
     pub folder: char,
     pub file: char,
+    pub symlink: char,
     pub folder_open: char,
     pub parent: char,
 }
@@ -19,6 +20,7 @@ impl Default for ThemeChars {
         Self {
             folder: ' ',
             file: ' ',
+            symlink: ' ',
             folder_open: ' ',
             parent: ' ',
         }
@@ -73,6 +75,7 @@ pub struct PanelColors {
     pub header_text_active: Color,  // 활성 패널 헤더 텍스트
     pub file_text: Color,
     pub directory_text: Color,
+    pub symlink_text: Color,
     pub selected_bg: Color,
     pub selected_text: Color,
     pub marked_text: Color,
@@ -619,6 +622,7 @@ impl Theme {
             header_text_active: Color::Indexed(242),  // 활성 패널 헤더 텍스트
             file_text: Color::Indexed(243),
             directory_text: Color::Indexed(67),
+            symlink_text: Color::Indexed(37),  // cyan for symlinks
             selected_bg: Color::Indexed(67),
             selected_text: Color::Indexed(231),
             marked_text: Color::Indexed(198),
@@ -1044,6 +1048,7 @@ impl Theme {
             header_text_active: Color::Indexed(255),  // 활성 패널 헤더 텍스트
             file_text: Color::Indexed(252),
             directory_text: Color::Indexed(117),
+            symlink_text: Color::Indexed(44),  // cyan for symlinks
             selected_bg: Color::Indexed(117),
             selected_text: Color::Indexed(16),
             marked_text: Color::Indexed(204),
@@ -1389,6 +1394,11 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn symlink_style(&self) -> Style {
+        Style::default()
+            .fg(self.panel.symlink_text)
+    }
+
     pub fn header_style(&self) -> Style {
         Style::default()
             .fg(self.panel.header_text)
@@ -1516,6 +1526,8 @@ impl Theme {
     "file_text": {},
     "__directory_text__": "디렉토리(폴더)명 텍스트 색상. bg 위에 표시됨. file_text와 다른 색상으로 폴더를 즉시 구별할 수 있어야 함. 일반적으로 file_text보다 강조된 색상 또는 다른 색조 사용",
     "directory_text": {},
+    "__symlink_text__": "심볼릭 링크 텍스트 색상. bg 위에 표시됨. file_text, directory_text와 다른 색상으로 링크임을 즉시 구별할 수 있어야 함. 일반적으로 cyan 계열 색상 사용",
+    "symlink_text": {},
     "__selected_bg__": "현재 커서가 위치한 항목의 배경 하이라이트. 사용자의 현재 포커스를 명확히 표시하는 핵심 요소. bg와 확연히 구분되어야 함. 그 위에 selected_text가 표시됨. marked_text와도 시각적으로 구분 필요",
     "selected_bg": {},
     "__selected_text__": "선택된 항목의 텍스트 색상. selected_bg 위에 표시되므로 배경색과 대비되는 어두운 색이어야 함",
@@ -2072,7 +2084,7 @@ impl Theme {
             ci(self.panel.bg), ci(self.panel.border), ci(self.panel.border_active),
             ci(self.panel.header_bg), ci(self.panel.header_bg_active),
             ci(self.panel.header_text), ci(self.panel.header_text_active),
-            ci(self.panel.file_text), ci(self.panel.directory_text),
+            ci(self.panel.file_text), ci(self.panel.directory_text), ci(self.panel.symlink_text),
             ci(self.panel.selected_bg), ci(self.panel.selected_text), ci(self.panel.marked_text),
             ci(self.panel.size_text), ci(self.panel.date_text),
             // header

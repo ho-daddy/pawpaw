@@ -489,6 +489,7 @@ pub struct Dialog {
 pub struct FileItem {
     pub name: String,
     pub is_directory: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub modified: DateTime<Local>,
     #[allow(dead_code)]
@@ -600,6 +601,7 @@ impl PanelState {
             self.files.push(FileItem {
                 name: "..".to_string(),
                 is_directory: true,
+                is_symlink: false,
                 size: 0,
                 modified: Local::now(),
                 permissions: String::new(),
@@ -613,7 +615,19 @@ impl PanelState {
 
             items.extend(entries.into_iter().filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let metadata = entry.metadata().ok()?;
+                    let path = entry.path();
+
+                    // Check if it's a symlink first
+                    let symlink_meta = fs::symlink_metadata(&path).ok()?;
+                    let is_symlink = symlink_meta.is_symlink();
+
+                    // For symlinks, follow to get target type; for others, use direct metadata
+                    let metadata = if is_symlink {
+                        fs::metadata(&path).ok().unwrap_or(symlink_meta.clone())
+                    } else {
+                        symlink_meta.clone()
+                    };
+
                     let is_directory = metadata.is_dir();
                     let size = if is_directory { 0 } else { metadata.len() };
                     let modified = metadata.modified().ok()
@@ -623,7 +637,7 @@ impl PanelState {
                     #[cfg(unix)]
                     let permissions = {
                         use std::os::unix::fs::PermissionsExt;
-                        let mode = metadata.permissions().mode();
+                        let mode = symlink_meta.permissions().mode();
                         crate::utils::format::format_permissions_short(mode)
                     };
                     #[cfg(not(unix))]
@@ -632,6 +646,7 @@ impl PanelState {
                     Some(FileItem {
                         name,
                         is_directory,
+                        is_symlink,
                         size,
                         modified,
                         permissions,

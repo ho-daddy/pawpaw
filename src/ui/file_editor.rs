@@ -435,16 +435,29 @@ impl EditorState {
     /// 파일 저장
     /// Security: Preserves original file permissions and uses atomic write
     pub fn save_file(&mut self) -> Result<(), String> {
+        // Resolve symlink to actual file path to avoid replacing symlink with regular file
+        let is_symlink = fs::symlink_metadata(&self.file_path)
+            .map(|m| m.is_symlink())
+            .unwrap_or(false);
+
+        let actual_path = if is_symlink {
+            fs::canonicalize(&self.file_path).map_err(|e| {
+                format!("Failed to resolve symlink: {}", e)
+            })?
+        } else {
+            self.file_path.clone()
+        };
+
         // Save original permissions before writing
         #[cfg(unix)]
-        let original_perms = fs::metadata(&self.file_path)
+        let original_perms = fs::metadata(&actual_path)
             .map(|m| m.permissions())
             .ok();
 
         let content = self.lines.join("\n");
 
         // Use atomic write: write to temp file, then rename
-        let temp_path = self.file_path.with_extension("tmp");
+        let temp_path = actual_path.with_extension("tmp");
 
         // Write to temporary file
         fs::write(&temp_path, &content).map_err(|e| {
@@ -458,7 +471,7 @@ impl EditorState {
         }
 
         // Atomic rename (on same filesystem)
-        fs::rename(&temp_path, &self.file_path).map_err(|e| {
+        fs::rename(&temp_path, &actual_path).map_err(|e| {
             // Clean up temp file on failure
             let _ = fs::remove_file(&temp_path);
             format!("Failed to save file: {}", e)
@@ -3111,9 +3124,16 @@ pub fn handle_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if modifiers.contains(KeyModifiers::SHIFT) {
                 // Shift+Tab: 내어쓰기
                 state.outdent();
+            } else if state.selection.is_some() {
+                // 선택 영역이 있으면 들여쓰기
+                state.indent();
             } else {
                 state.insert_tab();
             }
+        }
+        KeyCode::BackTab => {
+            // BackTab (일부 터미널에서 Shift+Tab): 내어쓰기
+            state.outdent();
         }
         KeyCode::Char(c) => {
             if !modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT)

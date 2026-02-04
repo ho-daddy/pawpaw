@@ -112,6 +112,8 @@ pub struct PanelColorsJson {
     pub file_text: u8,
     #[serde(default = "default_67")]
     pub directory_text: u8,
+    #[serde(default = "default_37")]
+    pub symlink_text: u8,
     #[serde(default = "default_67")]
     pub selected_bg: u8,
     #[serde(default = "default_231")]
@@ -802,6 +804,7 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         header_text_active: idx(json.panel.header_text_active),
         file_text: idx(json.panel.file_text),
         directory_text: idx(json.panel.directory_text),
+        symlink_text: idx(json.panel.symlink_text),
         selected_bg: idx(json.panel.selected_bg),
         selected_text: idx(json.panel.selected_text),
         marked_text: idx(json.panel.marked_text),
