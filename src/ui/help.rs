@@ -190,6 +190,8 @@ fn build_help_content(theme: &Theme) -> Vec<Line<'static>> {
     // ═══════════════════════════════════════════════════════════════════════
     lines.push(section("Selection & Marking"));
     lines.push(key_line("Space", "Select/deselect file"));
+    lines.push(key_line("Ctrl+A", "Select all files"));
+    lines.push(key_line("Shift+Up/Down", "Select while moving cursor"));
     lines.push(key_line("*", "Select/deselect all"));
     lines.push(key_line(";", "Select by extension"));
     lines.push(Line::from(vec![
@@ -303,7 +305,6 @@ fn build_help_content(theme: &Theme) -> Vec<Line<'static>> {
     // ═══════════════════════════════════════════════════════════════════════
     lines.push(section("AI Assistant"));
     lines.push(key_line(".", "Open AI assistant"));
-    lines.push(key_line("Ctrl+A", "Open AI assistant"));
     lines.push(key_line("Enter", "Send message"));
     lines.push(key_line("Shift+Enter", "New line in input"));
     lines.push(key_line("Ctrl+Up/Down", "Scroll response"));

@@ -73,8 +73,10 @@ const shortcutGroups = [
   {
     title: 'Selection & AI',
     shortcuts: [
-      { key: 'Space / *', action: 'Select / Select all' },
-      { key: ';', action: 'Select by extension' },
+      { key: 'Space', action: 'Select file' },
+      { key: 'Ctrl+A', action: 'Select all files' },
+      { key: 'Shift+↑↓', action: 'Select while moving' },
+      { key: '* / ;', action: 'Toggle all / By extension' },
       { key: 'n/s/d/y', action: 'Sort: name/size/date/type' },
       { key: '.', action: 'AI command' },
       { key: 'q', action: 'Quit' },

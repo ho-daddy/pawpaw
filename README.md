@@ -332,7 +332,9 @@ code-insiders /path/to/current/folder
 | Key | Action |
 |-----|--------|
 | `Space` | Select file |
-| `*` | Select all |
+| `Ctrl+A` | Select all files |
+| `Shift+↑/↓` | Select while moving cursor |
+| `*` | Toggle select all |
 | `;` | Select by extension |
 | `n` / `s` / `d` / `y` | Sort by name / size / date / type |
 | `.` | AI command |
@@ -406,8 +408,8 @@ COKACDIR supports fully customizable themes. You can modify the built-in themes 
 
 ```
 ~/.cokacdir/themes/
-├── light.json    # Light theme (default)
-└── dark.json     # Dark theme
+├── light.json    # Light theme
+└── dark.json     # Dark theme (default)
 ```
 
 Theme files are automatically created on first launch. To switch themes, edit `~/.cokacdir/settings.json`:
