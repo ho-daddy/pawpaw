@@ -894,8 +894,8 @@ Keep responses concise and terminal-friendly.",
                     self.session_id = Some(session_id.clone());
                 }
                 StreamMessage::Text { content } => {
-                    // Accumulate text in streaming buffer
-                    self.streaming_buffer.push_str(&content);
+                    // Replace streaming buffer with new text (stream-json sends full text, not deltas)
+                    self.streaming_buffer = content;
                     self.update_streaming_history();
                     has_new_content = true;
                 }

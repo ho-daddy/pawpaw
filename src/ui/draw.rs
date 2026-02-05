@@ -306,10 +306,20 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 /// AI 모드에서 에디터와 AI 화면을 나란히 표시
 fn draw_editor_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    // Layout: Panels, Status Bar, Function Bar (same as draw_dual_panel)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),    // Panels
+            Constraint::Length(1), // Status bar
+            Constraint::Length(1), // Function bar
+        ])
+        .split(area);
+
     let panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+        .split(chunks[0]);
 
     let ai_on_left = app.ai_panel_side == Some(PanelSide::Left);
 
@@ -330,14 +340,28 @@ fn draw_editor_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &The
             ai_screen::draw_with_focus(frame, state, panel_chunks[1], theme, false);
         }
     }
+
+    // Status bar and Function bar
+    draw_status_bar(frame, app, chunks[1], theme);
+    draw_function_bar(frame, app, chunks[2], theme);
 }
 
 /// AI 모드에서 뷰어와 AI 화면을 나란히 표시
 fn draw_viewer_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    // Layout: Panels, Status Bar, Function Bar (same as draw_dual_panel)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),    // Panels
+            Constraint::Length(1), // Status bar
+            Constraint::Length(1), // Function bar
+        ])
+        .split(area);
+
     let panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+        .split(chunks[0]);
 
     let ai_on_left = app.ai_panel_side == Some(PanelSide::Left);
 
@@ -358,4 +382,8 @@ fn draw_viewer_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &The
             ai_screen::draw_with_focus(frame, state, panel_chunks[1], theme, false);
         }
     }
+
+    // Status bar and Function bar
+    draw_status_bar(frame, app, chunks[1], theme);
+    draw_function_bar(frame, app, chunks[2], theme);
 }
