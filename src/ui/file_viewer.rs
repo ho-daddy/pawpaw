@@ -9,6 +9,7 @@ use ratatui::{
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use unicode_width::UnicodeWidthChar;
 
 use super::{
     app::{App, Screen},
@@ -648,9 +649,19 @@ pub fn draw(frame: &mut Frame, state: &mut ViewerState, area: Rect, theme: &Them
                 vec![Span::styled(line.clone(), line_bg_style)]
             };
 
-            // 수평 스크롤 적용
+            // 수평 스크롤 적용 (display width 기준)
             let final_spans = if state.horizontal_scroll > 0 {
-                let display_line: String = line.chars().skip(state.horizontal_scroll).collect();
+                // Skip characters until we've skipped horizontal_scroll display width
+                let mut skipped_width = 0;
+                let mut skip_chars = 0;
+                for c in line.chars() {
+                    if skipped_width >= state.horizontal_scroll {
+                        break;
+                    }
+                    skipped_width += c.width().unwrap_or(1);
+                    skip_chars += 1;
+                }
+                let display_line: String = line.chars().skip(skip_chars).collect();
                 if content_spans.len() == 1 {
                     vec![Span::styled(display_line, content_spans[0].style)]
                 } else {

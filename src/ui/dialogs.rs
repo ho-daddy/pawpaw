@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -313,11 +314,15 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
             (42, 5, 5) // Settings dialog: width=42, height=5
         }
         DialogType::BinaryFileHandler => {
-            // Dynamic height based on input length
+            // Dynamic height based on input display width
             let dialog_width = 75u16;
             let input_width = (dialog_width - 4) as usize; // border + padding
-            let input_len = dialog.input.chars().count();
-            let input_lines = if input_len == 0 { 1 } else { (input_len + input_width - 1) / input_width };
+            let input_display_width: usize = dialog.input.chars()
+                .map(|c| c.width().unwrap_or(1))
+                .sum();
+            // +1 for cursor block at end
+            let total_width = input_display_width + 1;
+            let input_lines = if total_width == 0 { 1 } else { (total_width + input_width - 1) / input_width };
             let input_lines = input_lines.clamp(1, 5); // min 1, max 5 lines
             let base_height = 11u16; // height with 1 input line + 1 blank line below
             let height = base_height + (input_lines as u16 - 1);
@@ -443,8 +448,12 @@ fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rec
 
     // Input field with placeholder (extension-specific examples)
     let input_width = (inner.width - 2) as usize;
-    let input_len = dialog.input.chars().count();
-    let input_lines = if input_len == 0 { 1 } else { (input_len + input_width - 1) / input_width };
+    let input_display_width: usize = dialog.input.chars()
+        .map(|c| c.width().unwrap_or(1))
+        .sum();
+    // +1 for cursor block at end
+    let total_width = input_display_width + 1;
+    let input_lines = if total_width == 0 { 1 } else { (total_width + input_width - 1) / input_width };
     let input_height = input_lines.clamp(1, 5) as u16;
     let input_area = Rect::new(inner.x + 1, inner.y + 5, inner.width - 2, input_height);
     let placeholder = get_handler_placeholder(extension);
@@ -473,8 +482,22 @@ fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rec
         let mut current_line_spans: Vec<Span> = Vec::new();
         let mut current_line_len = 0usize;
         let cursor_pos = dialog.cursor_pos.min(input_chars.len());
+        let mut cursor_line = 0usize; // Track which line the cursor is on
 
         for (i, &ch) in input_chars.iter().enumerate() {
+            let char_width = ch.width().unwrap_or(1);
+
+            // Wrap before adding if this char would exceed width
+            if current_line_len + char_width > input_width && current_line_len > 0 {
+                lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+                current_line_len = 0;
+            }
+
+            // Track cursor line
+            if i == cursor_pos {
+                cursor_line = lines.len();
+            }
+
             let style = if let Some((sel_start, sel_end)) = dialog.selection {
                 if i >= sel_start && i < sel_end {
                     selection_style
@@ -488,17 +511,17 @@ fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rec
             };
 
             current_line_spans.push(Span::styled(ch.to_string(), style));
-            current_line_len += 1;
-
-            // Wrap at input_width
-            if current_line_len >= input_width {
-                lines.push(Line::from(std::mem::take(&mut current_line_spans)));
-                current_line_len = 0;
-            }
+            current_line_len += char_width;
         }
 
         // Add cursor at end if needed (when cursor is at the end of input)
         if dialog.selection.is_none() && cursor_pos == input_chars.len() {
+            // Check if cursor would overflow current line
+            if current_line_len + 1 > input_width && current_line_len > 0 {
+                lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+                current_line_len = 0;
+            }
+            cursor_line = lines.len(); // Cursor is on this line
             current_line_spans.push(Span::styled(" ", cursor_style));
             current_line_len += 1;
         }
@@ -511,9 +534,24 @@ fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rec
         // If no lines, add empty line with cursor
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(" ", cursor_style)));
+            cursor_line = 0;
         }
 
-        frame.render_widget(Paragraph::new(lines), input_area);
+        // Scroll to show cursor line (max 5 visible lines)
+        let max_visible = input_height as usize;
+        let visible_lines = if lines.len() > max_visible {
+            // Calculate scroll offset to keep cursor visible
+            let scroll_start = if cursor_line >= max_visible {
+                cursor_line - max_visible + 1
+            } else {
+                0
+            };
+            lines.into_iter().skip(scroll_start).take(max_visible).collect()
+        } else {
+            lines
+        };
+
+        frame.render_widget(Paragraph::new(visible_lines), input_area);
     }
 
     // Key hints (Enter: confirm, Esc: cancel)
@@ -532,15 +570,6 @@ fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rec
         button_area,
     );
 
-    // Show cursor only when not in selection mode (with wrap support)
-    if dialog.selection.is_none() {
-        let cursor_pos = dialog.cursor_pos.min(dialog.input.chars().count());
-        let cursor_row = cursor_pos / input_width;
-        let cursor_col = cursor_pos % input_width;
-        let cursor_x = input_area.x + cursor_col as u16;
-        let cursor_y = input_area.y + cursor_row as u16;
-        frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
-    }
 }
 
 /// Get placeholder example command for file extension
@@ -752,24 +781,57 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
     let input_chars: Vec<char> = dialog.input.chars().collect();
     let cursor_pos = dialog.cursor_pos.min(input_chars.len());
 
-    // 스크롤 처리: 커서가 보이도록 표시 범위 계산
-    let (display_chars, display_cursor_pos) = if input_chars.len() > max_input_width {
+    // Calculate display width of input
+    let input_display_width: usize = input_chars.iter()
+        .map(|c| c.width().unwrap_or(1))
+        .sum();
+
+    // Calculate cursor's display position
+    let cursor_display_pos: usize = input_chars.iter()
+        .take(cursor_pos)
+        .map(|c| c.width().unwrap_or(1))
+        .sum();
+
+    // 스크롤 처리: 커서가 보이도록 표시 범위 계산 (display width 기준)
+    let (display_chars, display_cursor_pos) = if input_display_width > max_input_width {
         // 커서가 보이도록 스크롤 범위 계산
         let visible_width = max_input_width.saturating_sub(3); // "..." 제외
-        let scroll_start = if cursor_pos < visible_width {
-            0
-        } else {
-            cursor_pos.saturating_sub(visible_width) + 1
-        };
-        let scroll_end = (scroll_start + visible_width).min(input_chars.len());
-        let chars: Vec<char> = input_chars[scroll_start..scroll_end].to_vec();
+
+        // Find scroll_start (char index) such that cursor is visible
+        let mut scroll_start = 0;
+        let mut width_before_cursor = cursor_display_pos;
+        if width_before_cursor > visible_width {
+            let target_skip = width_before_cursor.saturating_sub(visible_width) + 1;
+            let mut skipped_width = 0;
+            for (i, c) in input_chars.iter().enumerate() {
+                if skipped_width >= target_skip {
+                    scroll_start = i;
+                    break;
+                }
+                skipped_width += c.width().unwrap_or(1);
+                scroll_start = i + 1;
+            }
+        }
+
+        // Collect visible chars
+        let mut visible_chars: Vec<char> = Vec::new();
+        let mut visible_width_sum = 0;
+        for c in input_chars.iter().skip(scroll_start) {
+            let cw = c.width().unwrap_or(1);
+            if visible_width_sum + cw > visible_width {
+                break;
+            }
+            visible_chars.push(*c);
+            visible_width_sum += cw;
+        }
+
         let adj_cursor = cursor_pos.saturating_sub(scroll_start);
         if scroll_start > 0 {
             let mut prefix_chars = vec!['.', '.', '.'];
-            prefix_chars.extend(chars);
+            prefix_chars.extend(visible_chars);
             (prefix_chars, adj_cursor + 3)
         } else {
-            (chars, adj_cursor)
+            (visible_chars, adj_cursor)
         }
     } else {
         (input_chars.clone(), cursor_pos)

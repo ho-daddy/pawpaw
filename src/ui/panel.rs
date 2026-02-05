@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app::{PanelState, SortBy, SortOrder}, theme::Theme};
 use crate::utils::format::format_size;
@@ -13,18 +13,25 @@ use crate::utils::format::format_size;
 pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bool, is_bookmarked: bool, theme: &Theme) {
     let inner_width = area.width.saturating_sub(2) as usize;
 
-    // Build path display (truncate if too long)
+    // Build path display (truncate if too long, using display width)
     let path_str = panel.path.display().to_string();
     let bookmark_marker = if is_bookmarked { "✻" } else { "" };
-    let display_path = if inner_width > 4 && path_str.len() > inner_width.saturating_sub(4) {
-        let suffix_len = inner_width.saturating_sub(7);
-        let start = path_str.len().saturating_sub(suffix_len);
-        // Ensure we don't slice in the middle of a UTF-8 character
-        let safe_start = path_str.char_indices()
-            .map(|(i, _)| i)
-            .find(|&i| i >= start)
-            .unwrap_or(path_str.len());
-        format!("{}...{}", bookmark_marker, &path_str[safe_start..])
+    let path_display_width = path_str.width();
+    let display_path = if inner_width > 4 && path_display_width > inner_width.saturating_sub(4) {
+        // Calculate how many characters to show from the end (by display width)
+        let target_width = inner_width.saturating_sub(7); // "..." prefix + marker
+        let mut suffix_width = 0;
+        let mut start_char_idx = path_str.chars().count();
+        for (i, c) in path_str.chars().rev().enumerate() {
+            let cw = c.width().unwrap_or(1);
+            if suffix_width + cw > target_width {
+                break;
+            }
+            suffix_width += cw;
+            start_char_idx = path_str.chars().count() - i - 1;
+        }
+        let suffix: String = path_str.chars().skip(start_char_idx).collect();
+        format!("{}...{}", bookmark_marker, suffix)
     } else {
         format!("{}{}", bookmark_marker, path_str)
     };

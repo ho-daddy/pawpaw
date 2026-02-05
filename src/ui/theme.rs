@@ -1,6 +1,9 @@
 use ratatui::style::{Color, Modifier, Style};
 use supports_color::Stream;
 
+/// Default theme name used throughout the application
+pub const DEFAULT_THEME_NAME: &str = "dark";
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 아이콘 문자
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -347,7 +350,8 @@ pub struct AIScreenColors {
     pub input_border: Color,                // 입력 영역 테두리
     pub input_prompt: Color,                // "> " 입력 프롬프트
     pub input_text: Color,                  // 입력 텍스트
-    pub input_cursor: Color,                // 커서
+    pub input_cursor_fg: Color,             // 커서 전경색 (커서 위 문자)
+    pub input_cursor_bg: Color,             // 커서 배경색
     pub input_placeholder: Color,           // 플레이스홀더
 
     // === 처리 중 상태 ===
@@ -356,6 +360,13 @@ pub struct AIScreenColors {
 
     // === 에러 상태 ===
     pub error_text: Color,                  // "Claude CLI not available"
+
+    // === 도구 사용 표시 ===
+    pub tool_use_prefix: Color,             // "⚙ " 도구 사용 프리픽스
+    pub tool_use_name: Color,               // 도구 이름 (Bash, Write 등)
+    pub tool_use_input: Color,              // 도구 입력 내용
+    pub tool_result_prefix: Color,          // "→ " 도구 결과 프리픽스
+    pub tool_result_text: Color,            // 도구 결과 텍스트
 
     // === 하단 도움말 ===
     pub footer_key: Color,                  // 단축키 텍스트
@@ -846,7 +857,8 @@ impl Theme {
             input_border: Color::Indexed(238),          // 입력 테두리 (editor.border)
             input_prompt: Color::Indexed(74),           // 입력 ">" (editor.footer_key)
             input_text: Color::Indexed(243),            // 입력 텍스트 (editor.text)
-            input_cursor: Color::Indexed(238),          // 커서 (editor.cursor)
+            input_cursor_fg: Color::Indexed(255),       // 커서 위 문자 (흰색 - 반전)
+            input_cursor_bg: Color::Indexed(238),       // 커서 배경 (어두운색)
             input_placeholder: Color::Indexed(251),     // 플레이스홀더 (editor.footer_text)
 
             // === 처리 중 상태 ===
@@ -855,6 +867,13 @@ impl Theme {
 
             // === 에러 상태 ===
             error_text: Color::Indexed(198),            // 에러 텍스트 (panel.marked_text)
+
+            // === 도구 사용 표시 ===
+            tool_use_prefix: Color::Indexed(136),       // "⚙ " 도구 프리픽스 (황색)
+            tool_use_name: Color::Indexed(67),          // 도구 이름 (디렉토리 색상)
+            tool_use_input: Color::Indexed(243),        // 도구 입력 (일반 텍스트)
+            tool_result_prefix: Color::Indexed(34),     // "→ " 결과 프리픽스 (녹색)
+            tool_result_text: Color::Indexed(243),      // 결과 텍스트 (일반 텍스트)
 
             // === 하단 도움말 ===
             footer_key: Color::Indexed(74),             // 단축키 (editor.footer_key)
@@ -1238,11 +1257,17 @@ impl Theme {
             input_border: Color::Indexed(252),
             input_prompt: Color::Indexed(117),
             input_text: Color::Indexed(252),
-            input_cursor: Color::Indexed(252),
+            input_cursor_fg: Color::Indexed(235),   // 커서 위 문자 (배경색으로 반전)
+            input_cursor_bg: Color::Indexed(252),   // 커서 배경 (밝은색)
             input_placeholder: Color::Indexed(245),
             processing_spinner: Color::Indexed(117),
             processing_text: Color::Indexed(245),
             error_text: Color::Indexed(204),
+            tool_use_prefix: Color::Indexed(179),       // "⚙ " 도구 프리픽스 (황색)
+            tool_use_name: Color::Indexed(81),          // 도구 이름 (시안)
+            tool_use_input: Color::Indexed(252),        // 도구 입력 (일반 텍스트)
+            tool_result_prefix: Color::Indexed(114),    // "→ " 결과 프리픽스 (녹색)
+            tool_result_text: Color::Indexed(252),      // 결과 텍스트 (일반 텍스트)
             footer_key: Color::Indexed(117),
             footer_text: Color::Indexed(245),
         };
@@ -1874,8 +1899,10 @@ impl Theme {
     "input_prompt": {},
     "__input_text__": "사용자 입력 텍스트. 입력 영역에서 타이핑 중인 메시지. message_text와 동일하거나 유사",
     "input_text": {},
-    "__input_cursor__": "입력 커서 색상. 현재 타이핑 위치 표시",
-    "input_cursor": {},
+    "__input_cursor_fg__": "입력 커서 전경색. 커서 위치의 문자 색상. input_cursor_bg 위에 표시됨",
+    "input_cursor_fg": {},
+    "__input_cursor_bg__": "입력 커서 배경색. 현재 타이핑 위치를 반전 블록으로 표시",
+    "input_cursor_bg": {},
     "__input_placeholder__": "입력 플레이스홀더. 입력 전 안내 문구('Type a message...'). input_text보다 낮은 시각적 강조",
     "input_placeholder": {},
     "__processing_spinner__": "AI 응답 대기 중 스피너/로딩 표시 색상. 처리 중임을 시각적으로 안내",
@@ -1884,6 +1911,16 @@ impl Theme {
     "processing_text": {},
     "__error_text__": "에러 메시지 텍스트. API 오류, 연결 실패 등. state.error와 유사",
     "error_text": {},
+    "__tool_use_prefix__": "도구 사용 표시 접두사(⚙). AI가 도구를 사용할 때 표시. tool_use_name과 함께 도구 호출을 시각화",
+    "tool_use_prefix": {},
+    "__tool_use_name__": "도구 이름 텍스트(Bash, Write, Read 등). tool_use_prefix 옆에 표시. 어떤 도구가 사용되는지 명확히 구분",
+    "tool_use_name": {},
+    "__tool_use_input__": "도구 입력 내용 텍스트. 도구에 전달되는 명령이나 파라미터. message_text와 유사하거나 약간 흐리게",
+    "tool_use_input": {},
+    "__tool_result_prefix__": "도구 결과 표시 접두사(→). 도구 실행 결과 앞에 표시. tool_result_text와 함께 결과를 시각화",
+    "tool_result_prefix": {},
+    "__tool_result_text__": "도구 실행 결과 텍스트. 명령 출력, 파일 내용 등. message_text와 유사",
+    "tool_result_text": {},
     "__footer_key__": "하단 도움말의 단축키. Enter:Send, Esc:Exit 등",
     "footer_key": {},
     "__footer_text__": "하단 도움말 설명"
@@ -2158,9 +2195,12 @@ impl Theme {
             ci(self.ai_screen.user_prefix), ci(self.ai_screen.assistant_prefix),
             ci(self.ai_screen.error_prefix), ci(self.ai_screen.system_prefix), ci(self.ai_screen.message_text),
             ci(self.ai_screen.input_border), ci(self.ai_screen.input_prompt), ci(self.ai_screen.input_text),
-            ci(self.ai_screen.input_cursor), ci(self.ai_screen.input_placeholder),
+            ci(self.ai_screen.input_cursor_fg), ci(self.ai_screen.input_cursor_bg), ci(self.ai_screen.input_placeholder),
             ci(self.ai_screen.processing_spinner), ci(self.ai_screen.processing_text),
-            ci(self.ai_screen.error_text), ci(self.ai_screen.footer_key), ci(self.ai_screen.footer_text),
+            ci(self.ai_screen.error_text),
+            ci(self.ai_screen.tool_use_prefix), ci(self.ai_screen.tool_use_name), ci(self.ai_screen.tool_use_input),
+            ci(self.ai_screen.tool_result_prefix), ci(self.ai_screen.tool_result_text),
+            ci(self.ai_screen.footer_key), ci(self.ai_screen.footer_text),
             // system_info
             ci(self.system_info.bg), ci(self.system_info.border), ci(self.system_info.section_title),
             ci(self.system_info.label), ci(self.system_info.value),

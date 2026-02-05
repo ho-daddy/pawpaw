@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, DEFAULT_THEME_NAME};
 
 /// Panel-specific settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub struct ThemeSettings {
 }
 
 fn default_theme_name() -> String {
-    "light".to_string()
+    DEFAULT_THEME_NAME.to_string()
 }
 
 impl Default for ThemeSettings {
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(settings.active_panel, "left");
         assert_eq!(settings.left_panel.sort_by, "name");
         assert_eq!(settings.left_panel.sort_order, "asc");
-        assert_eq!(settings.theme.name, "light");
+        assert_eq!(settings.theme.name, DEFAULT_THEME_NAME);
     }
 
     #[test]

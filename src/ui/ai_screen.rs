@@ -7,14 +7,31 @@ use ratatui::{
     Frame,
 };
 use rand::Rng;
+use unicode_width::UnicodeWidthChar;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
+/// Debug logging helper (disabled)
+#[allow(unused_variables)]
+fn debug_log(_msg: &str) {
+    // Disabled - uncomment below to enable debug logging
+    // if let Ok(mut file) = OpenOptions::new()
+    //     .create(true)
+    //     .append(true)
+    //     .open("./debug.log")
+    // {
+    //     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+    //     let _ = writeln!(file, "[{}] [ai_screen] {}", timestamp, _msg);
+    // }
+}
+
 use super::theme::Theme;
-use crate::services::claude::{self, ClaudeResponse};
+use super::syntax::{Language, SyntaxHighlighter};
+use crate::services::claude::{self, StreamMessage};
 use crate::utils::markdown::{is_line_empty, render_markdown, MarkdownTheme};
 
 /// Sanitize user input to prevent prompt injection attacks
@@ -104,6 +121,8 @@ pub enum HistoryType {
     Assistant,
     Error,
     System,
+    ToolUse,      // Tool usage display (e.g., "⚙ Bash")
+    ToolResult,   // Tool execution result
 }
 
 /// Placeholder messages for AI input
@@ -127,8 +146,10 @@ pub struct AIScreenState {
     pub claude_available: bool,
     pub current_path: String,
     pub placeholder_index: usize,
-    /// Channel receiver for async Claude responses
-    response_receiver: Option<Receiver<ClaudeResponse>>,
+    /// Channel receiver for streaming Claude responses
+    response_receiver: Option<Receiver<StreamMessage>>,
+    /// Buffer for accumulating streaming text response
+    streaming_buffer: String,
     /// Last known max scroll value (cached from draw)
     pub last_max_scroll: usize,
     /// Last known total lines (cached from draw)
@@ -162,6 +183,8 @@ impl AIScreenState {
     /// Add item to history with size limit to prevent memory exhaustion
     /// Also normalizes consecutive empty lines in content
     pub fn add_to_history(&mut self, item: HistoryItem) {
+        debug_log(&format!("add_to_history: type={:?}, content={} chars",
+            item.item_type, item.content.len()));
         // Remove oldest items if we're at the limit
         while self.history.len() >= MAX_HISTORY_ITEMS {
             self.history.remove(0);
@@ -172,6 +195,7 @@ impl AIScreenState {
             content: normalize_empty_lines(&item.content),
         };
         self.history.push(normalized_item);
+        debug_log(&format!("  -> history now has {} items", self.history.len()));
     }
 
     /// Validate session ID to prevent path injection attacks
@@ -207,9 +231,9 @@ impl AIScreenState {
             return;
         }
 
-        // Filter out system messages (warnings) - only save user conversations
+        // Filter out system messages - save all conversation content including tool calls
         let saveable_history: Vec<HistoryItem> = self.history.iter()
-            .filter(|item| item.item_type != HistoryType::System)
+            .filter(|item| !matches!(item.item_type, HistoryType::System))
             .cloned()
             .collect();
 
@@ -305,6 +329,7 @@ impl AIScreenState {
             current_path,  // Use current path, not session's stored path
             placeholder_index,
             response_receiver: None,
+            streaming_buffer: String::new(),
             last_max_scroll: 0,
             last_total_lines: 0,
             last_visible_height: 0,
@@ -346,6 +371,7 @@ impl AIScreenState {
             current_path,
             placeholder_index,
             response_receiver: None,
+            streaming_buffer: String::new(),
             last_max_scroll: 0,
             last_total_lines: 0,
             last_visible_height: 0,
@@ -534,16 +560,20 @@ impl AIScreenState {
     }
 
     pub fn submit(&mut self) {
+        debug_log("=== submit() called ===");
         let input_text = self.get_input_text();
         if input_text.trim().is_empty() || self.is_processing {
+            debug_log(&format!("submit() early return: empty={}, processing={}", input_text.trim().is_empty(), self.is_processing));
             return;
         }
 
         let user_input = input_text.trim().to_string();
+        debug_log(&format!("User input: {}", user_input));
         self.set_input_text("");
 
         // Handle /clear command
         if user_input.to_lowercase() == "/clear" {
+            debug_log("Handling /clear command");
             self.history.clear();
             self.session_id = None;
             self.scroll_offset = 0;
@@ -552,10 +582,12 @@ impl AIScreenState {
 
         // Check claude availability before actual API call
         if !self.claude_available {
+            debug_log("Claude not available, returning");
             return;
         }
 
         // Add user message immediately
+        debug_log("Adding user message to history");
         self.add_to_history(HistoryItem {
             item_type: HistoryType::User,
             content: user_input.clone(),
@@ -563,6 +595,8 @@ impl AIScreenState {
 
         // Set processing state
         self.is_processing = true;
+        self.streaming_buffer.clear();
+        debug_log("Set is_processing = true");
 
         // Sanitize user input to prevent prompt injection
         let sanitized_input = sanitize_user_input(&user_input);
@@ -586,75 +620,209 @@ Keep responses concise and terminal-friendly.",
         let session_id = self.session_id.clone();
         let current_path = self.current_path.clone();
 
-        // Create channel for async response
+        // Create channel for streaming response
         let (tx, rx) = mpsc::channel();
         self.response_receiver = Some(rx);
+        debug_log("Created channel, spawning thread...");
 
-        // Spawn thread to execute Claude command
+        // Spawn thread to execute Claude command with streaming
         thread::spawn(move || {
-            let response = claude::execute_command(
+            debug_log("Thread started, calling execute_command_streaming...");
+            if let Err(e) = claude::execute_command_streaming(
                 &context_prompt,
                 session_id.as_deref(),
                 &current_path,
-            );
-            let _ = tx.send(response);
+                tx.clone(),
+            ) {
+                debug_log(&format!("execute_command_streaming error: {}", e));
+                let _ = tx.send(StreamMessage::Error { message: e });
+            }
+            debug_log("Thread finished");
         });
+        debug_log("Thread spawned, submit() returning");
     }
 
-    /// Poll for async response from Claude
+    /// Poll for streaming response from Claude
     /// Returns true if still processing, false if done or no request pending
     pub fn poll_response(&mut self) -> bool {
         if !self.is_processing {
             return false;
         }
 
-        if let Some(ref receiver) = self.response_receiver {
-            match receiver.try_recv() {
-                Ok(response) => {
-                    // Got response
-                    if response.success {
-                        if let Some(sid) = response.session_id {
-                            self.session_id = Some(sid);
-                        }
-                        let content = response.response.unwrap_or_else(|| "Command executed.".to_string());
-                        self.add_to_history(HistoryItem {
-                            item_type: HistoryType::Assistant,
-                            content: normalize_empty_lines(&content),
-                        });
-                    } else {
-                        self.add_to_history(HistoryItem {
-                            item_type: HistoryType::Error,
-                            content: response.error.unwrap_or_else(|| "Unknown error".to_string()),
-                        });
-                    }
+        // Collect messages first to avoid borrow conflicts
+        let mut messages = Vec::new();
+        let mut channel_disconnected = false;
 
+        if let Some(ref receiver) = self.response_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(msg) => {
+                        debug_log(&format!("poll_response: received message: {:?}", std::mem::discriminant(&msg)));
+                        messages.push(msg);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        debug_log("poll_response: channel disconnected");
+                        channel_disconnected = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            debug_log("poll_response: response_receiver is None but is_processing=true!");
+        }
+
+        if !messages.is_empty() {
+            debug_log(&format!("poll_response: processing {} messages", messages.len()));
+        }
+
+        // Now process collected messages
+        for msg in messages {
+            match msg {
+                StreamMessage::Init { session_id } => {
+                    debug_log(&format!("Processing Init: session_id={}", session_id));
+                    self.session_id = Some(session_id);
+                }
+                StreamMessage::Text { content } => {
+                    debug_log(&format!("Processing Text: {} chars, buffer now {} chars", content.len(), self.streaming_buffer.len() + content.len()));
+                    // Accumulate text in streaming buffer
+                    self.streaming_buffer.push_str(&content);
+                    self.update_streaming_history();
+                }
+                StreamMessage::ToolUse { name, input } => {
+                    debug_log(&format!("Processing ToolUse: {}", name));
+                    // Add tool use history item
+                    self.add_to_history(HistoryItem {
+                        item_type: HistoryType::ToolUse,
+                        content: format!("{}\n{}", name, input),
+                    });
+                }
+                StreamMessage::ToolResult { content, is_error } => {
+                    debug_log(&format!("Processing ToolResult: {} chars, is_error={}", content.len(), is_error));
+                    // Add tool result - limit content length for display
+                    let display_content = if content.chars().count() > 500 {
+                        let truncated: String = content.chars().take(500).collect();
+                        let remaining = content.chars().count() - 500;
+                        format!("{}...\n[{} more chars]", truncated, remaining)
+                    } else {
+                        content
+                    };
+                    self.add_to_history(HistoryItem {
+                        item_type: if is_error { HistoryType::Error } else { HistoryType::ToolResult },
+                        content: display_content,
+                    });
+                }
+                StreamMessage::Done { result, session_id } => {
+                    debug_log(&format!("Processing Done: result={} chars, session_id={:?}", result.len(), session_id));
+                    // Update session ID if provided
+                    if let Some(sid) = session_id {
+                        self.session_id = Some(sid);
+                    }
+                    // Finalize with the result
+                    self.finalize_streaming_history(&result);
                     self.is_processing = false;
                     self.response_receiver = None;
-                    // Scroll to bottom if auto_scroll is enabled
-                    // Use sentinel value - will be normalized in draw
-                    if self.auto_scroll {
-                        self.scroll_offset = usize::MAX;
-                    }
+                    debug_log("Done processing complete, returning false");
                     return false;
                 }
-                Err(TryRecvError::Empty) => {
-                    // Still processing
-                    return true;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    // Channel closed unexpectedly
+                StreamMessage::Error { message } => {
+                    debug_log(&format!("Processing Error: {}", message));
                     self.add_to_history(HistoryItem {
                         item_type: HistoryType::Error,
-                        content: "Request was cancelled or failed.".to_string(),
+                        content: message,
                     });
                     self.is_processing = false;
                     self.response_receiver = None;
                     return false;
                 }
             }
+
+            // Auto scroll while processing
+            if self.auto_scroll {
+                self.scroll_offset = usize::MAX;
+            }
         }
 
-        false
+        // Handle disconnection
+        if channel_disconnected {
+            if !self.streaming_buffer.is_empty() {
+                let buffer = self.streaming_buffer.clone();
+                self.finalize_streaming_history(&buffer);
+            } else {
+                self.add_to_history(HistoryItem {
+                    item_type: HistoryType::Error,
+                    content: "Request was cancelled or failed.".to_string(),
+                });
+            }
+            self.is_processing = false;
+            self.response_receiver = None;
+            return false;
+        }
+
+        self.is_processing
+    }
+
+    /// Update streaming history with current buffer content
+    fn update_streaming_history(&mut self) {
+        debug_log(&format!("update_streaming_history: buffer={} chars, history_len={}",
+            self.streaming_buffer.len(), self.history.len()));
+
+        // Find or create the streaming Assistant item
+        let normalized = normalize_empty_lines(&self.streaming_buffer);
+
+        // Check if last item is a streaming Assistant response
+        if let Some(last) = self.history.last_mut() {
+            if last.item_type == HistoryType::Assistant && self.is_processing {
+                debug_log("  -> Updating existing Assistant item");
+                last.content = normalized;
+                return;
+            }
+        }
+
+        // Add new Assistant item
+        debug_log("  -> Adding new Assistant item");
+        self.history.push(HistoryItem {
+            item_type: HistoryType::Assistant,
+            content: normalized,
+        });
+
+        // Enforce history limit
+        while self.history.len() > MAX_HISTORY_ITEMS {
+            self.history.remove(0);
+        }
+    }
+
+    /// Finalize streaming with the final result
+    fn finalize_streaming_history(&mut self, final_result: &str) {
+        debug_log(&format!("finalize_streaming_history: result={} chars", final_result.len()));
+
+        // Clear streaming buffer
+        self.streaming_buffer.clear();
+
+        // If final_result is not empty, update or replace the last Assistant item
+        if !final_result.is_empty() {
+            let normalized = normalize_empty_lines(final_result);
+
+            // Find the last Assistant item and update it
+            if let Some(last) = self.history.iter_mut().rev()
+                .find(|h| h.item_type == HistoryType::Assistant)
+            {
+                debug_log("  -> Updated existing Assistant item with final result");
+                last.content = normalized;
+            } else {
+                // No Assistant item found, add one
+                debug_log("  -> Adding new Assistant item with final result");
+                self.add_to_history(HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: normalized,
+                });
+            }
+        }
+
+        // Scroll to bottom
+        if self.auto_scroll {
+            self.scroll_offset = usize::MAX;
+        }
     }
 
     /// Cancel the current processing request
@@ -685,12 +853,39 @@ pub fn draw_with_focus(frame: &mut Frame, state: &mut AIScreenState, area: Rect,
         .style(Style::default().bg(theme.ai_screen.bg));
     frame.render_widget(background, area);
 
+    // Calculate input area height based on display width (like Handler)
+    // Account for borders: left(1) + right(1) + prompt(2) = 4
+    let input_width = area.width.saturating_sub(4) as usize;
+    let mut total_display_lines = 0usize;
+
+    for line_text in state.input_lines.iter() {
+        if line_text.is_empty() {
+            total_display_lines += 1;
+        } else {
+            let line_display_width: usize = line_text.chars()
+                .map(|c| c.width().unwrap_or(1))
+                .sum();
+            // +1 for cursor if this is the cursor line
+            let total_width = line_display_width + 1;
+            let line_count = if input_width > 0 {
+                (total_width + input_width - 1) / input_width
+            } else {
+                1
+            };
+            total_display_lines += line_count.max(1);
+        }
+    }
+    total_display_lines = total_display_lines.max(1);
+
+    // +1 for bottom border, max 10 lines
+    let input_height = (total_display_lines as u16 + 1).min(10);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),    // History area (no bottom border)
             Constraint::Length(1), // Separator line (├───┤)
-            Constraint::Length(2), // Input area (no top border, reduced height)
+            Constraint::Length(input_height), // Input area (dynamic height)
         ])
         .split(area);
 
@@ -749,34 +944,76 @@ fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme:
     let mut lines: Vec<Line> = Vec::new();
 
     for item in &state.history {
-        let (icon, color) = match item.item_type {
-            HistoryType::User => ("> ", theme.ai_screen.user_prefix),
-            HistoryType::Assistant => ("< ", theme.ai_screen.assistant_prefix),
-            HistoryType::Error => ("! ", theme.ai_screen.error_prefix),
-            HistoryType::System => ("* ", theme.ai_screen.system_prefix),
-        };
+        match item.item_type {
+            HistoryType::ToolUse => {
+                // Tool use: "⚙ Bash" followed by input
+                let content_lines: Vec<&str> = item.content.lines().collect();
 
-        let prefix_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-        let message_style = Style::default().fg(theme.ai_screen.message_text);
+                // Create JSON highlighter for tool input
+                let mut json_highlighter = SyntaxHighlighter::new(Language::Json, theme.syntax);
 
-        // For assistant messages, render Markdown
-        if item.item_type == HistoryType::Assistant {
-            let md_lines = render_markdown(&item.content, md_theme);
-            for (i, md_line) in md_lines.into_iter().enumerate() {
-                let prefix = if i == 0 { icon } else { "  " };
-                let mut spans = vec![Span::styled(prefix, prefix_style)];
-                spans.extend(md_line.spans);
-                lines.push(Line::from(spans));
+                for (i, line_text) in content_lines.iter().enumerate() {
+                    if i == 0 {
+                        // First line is the tool name
+                        lines.push(Line::from(vec![
+                            Span::styled("⚙ ", Style::default().fg(theme.ai_screen.tool_use_prefix).add_modifier(Modifier::BOLD)),
+                            Span::styled(line_text.to_string(), Style::default().fg(theme.ai_screen.tool_use_name).add_modifier(Modifier::BOLD)),
+                        ]));
+                    } else {
+                        // Subsequent lines are the JSON input - apply syntax highlighting
+                        let tokens = json_highlighter.tokenize_line(line_text);
+                        let mut spans = vec![Span::styled("  ", Style::default())];
+                        for token in tokens {
+                            spans.push(Span::styled(token.text, json_highlighter.style_for(token.token_type)));
+                        }
+                        lines.push(Line::from(spans));
+                    }
+                }
             }
-        } else {
-            // Regular text rendering for non-assistant messages
-            let content_lines: Vec<&str> = item.content.lines().collect();
-            for (i, line_text) in content_lines.iter().enumerate() {
-                let prefix = if i == 0 { icon } else { "  " };
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(line_text.to_string(), message_style),
-                ]));
+            HistoryType::ToolResult => {
+                // Tool result: "→ " followed by result
+                let content_lines: Vec<&str> = item.content.lines().collect();
+                for (i, line_text) in content_lines.iter().enumerate() {
+                    let prefix = if i == 0 { "→ " } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(theme.ai_screen.tool_result_prefix).add_modifier(Modifier::BOLD)),
+                        Span::styled(line_text.to_string(), Style::default().fg(theme.ai_screen.tool_result_text)),
+                    ]));
+                }
+            }
+            _ => {
+                // Original handling for User, Assistant, Error, System
+                let (icon, color) = match item.item_type {
+                    HistoryType::User => ("> ", theme.ai_screen.user_prefix),
+                    HistoryType::Assistant => ("< ", theme.ai_screen.assistant_prefix),
+                    HistoryType::Error => ("! ", theme.ai_screen.error_prefix),
+                    HistoryType::System => ("* ", theme.ai_screen.system_prefix),
+                    _ => unreachable!(),
+                };
+
+                let prefix_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                let message_style = Style::default().fg(theme.ai_screen.message_text);
+
+                // For assistant messages, render Markdown
+                if item.item_type == HistoryType::Assistant {
+                    let md_lines = render_markdown(&item.content, md_theme);
+                    for (i, md_line) in md_lines.into_iter().enumerate() {
+                        let prefix = if i == 0 { icon } else { "  " };
+                        let mut spans = vec![Span::styled(prefix, prefix_style)];
+                        spans.extend(md_line.spans);
+                        lines.push(Line::from(spans));
+                    }
+                } else {
+                    // Regular text rendering for non-assistant messages
+                    let content_lines: Vec<&str> = item.content.lines().collect();
+                    for (i, line_text) in content_lines.iter().enumerate() {
+                        let prefix = if i == 0 { icon } else { "  " };
+                        lines.push(Line::from(vec![
+                            Span::styled(prefix, prefix_style),
+                            Span::styled(line_text.to_string(), message_style),
+                        ]));
+                    }
+                }
             }
         }
         lines.push(Line::from("")); // Empty line between messages
@@ -931,42 +1168,155 @@ fn draw_input(frame: &mut Frame, state: &AIScreenState, area: Rect, theme: &Them
             inner,
         );
     } else {
-        // Render multiline input
+        // Styles (same as Handler)
+        let cursor_style = Style::default()
+            .fg(theme.ai_screen.input_cursor_fg)
+            .bg(theme.ai_screen.input_cursor_bg);
+        let text_style = Style::default().fg(theme.ai_screen.input_text);
+        let prompt_style = Style::default().fg(theme.ai_screen.input_prompt);
+
         let input_text = state.get_input_text();
         if input_text.is_empty() {
-            // Show placeholder with cursor
+            // Show placeholder with cursor block
             let placeholder_line = Line::from(vec![
-                Span::styled("> ", Style::default().fg(theme.ai_screen.input_prompt)),
-                Span::styled("_", Style::default().fg(theme.ai_screen.input_cursor).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled("> ", prompt_style),
+                Span::styled(" ", cursor_style),
                 Span::styled(state.get_placeholder(), Style::default().fg(theme.ai_screen.input_placeholder)),
             ]);
             frame.render_widget(Paragraph::new(placeholder_line), inner);
         } else {
-            let mut lines: Vec<Line> = Vec::new();
+            // Calculate input width (excluding prompt "> ")
+            let input_width = inner.width.saturating_sub(2) as usize; // ">" + space
+            let max_visible_lines = inner.height as usize;
+
+            // Build all display lines with word wrap (like Handler)
+            let mut all_lines: Vec<Line> = Vec::new();
+            let mut cursor_display_line = 0usize;
+
+            // Global character index for cursor tracking
+            let mut global_char_idx = 0usize;
+            let cursor_global_pos = {
+                let mut pos = 0usize;
+                for (i, line) in state.input_lines.iter().enumerate() {
+                    if i < state.cursor_line {
+                        pos += line.chars().count() + 1; // +1 for newline
+                    } else {
+                        pos += state.cursor_col;
+                        break;
+                    }
+                }
+                pos
+            };
+
             for (line_idx, line_text) in state.input_lines.iter().enumerate() {
                 let prefix = if line_idx == 0 { "> " } else { "  " };
-                let is_cursor_line = line_idx == state.cursor_line;
+                let input_chars: Vec<char> = line_text.chars().collect();
 
-                if is_cursor_line {
-                    // Insert cursor at position
-                    let chars: Vec<char> = line_text.chars().collect();
-                    let before: String = chars.iter().take(state.cursor_col).collect();
-                    let after: String = chars.iter().skip(state.cursor_col).collect();
-
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(theme.ai_screen.input_prompt)),
-                        Span::styled(before, Style::default().fg(theme.ai_screen.input_text)),
-                        Span::styled("_", Style::default().fg(theme.ai_screen.input_cursor).add_modifier(Modifier::SLOW_BLINK)),
-                        Span::styled(after, Style::default().fg(theme.ai_screen.input_text)),
-                    ]));
+                if input_chars.is_empty() {
+                    // Empty line - check if cursor is here
+                    let mut spans = vec![Span::styled(prefix, prompt_style)];
+                    if line_idx == state.cursor_line {
+                        spans.push(Span::styled(" ", cursor_style));
+                        cursor_display_line = all_lines.len();
+                    }
+                    all_lines.push(Line::from(spans));
+                    global_char_idx += 1; // newline
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(theme.ai_screen.input_prompt)),
-                        Span::styled(line_text.clone(), Style::default().fg(theme.ai_screen.input_text)),
-                    ]));
+                    // Build wrapped lines for this logical line
+                    let mut current_line_spans: Vec<Span> = Vec::new();
+                    let mut current_line_len = 0usize;
+                    let mut is_first_wrap = true;
+
+                    for (i, &ch) in input_chars.iter().enumerate() {
+                        let char_width = ch.width().unwrap_or(1);
+
+                        // Wrap before adding if this char would exceed width
+                        if current_line_len + char_width > input_width && current_line_len > 0 {
+                            // Add prefix for first wrap line
+                            let mut line_spans = if is_first_wrap {
+                                vec![Span::styled(prefix, prompt_style)]
+                            } else {
+                                vec![Span::styled("  ", prompt_style)] // continuation indent
+                            };
+                            line_spans.extend(std::mem::take(&mut current_line_spans));
+                            all_lines.push(Line::from(line_spans));
+                            current_line_len = 0;
+                            is_first_wrap = false;
+                        }
+
+                        // Track cursor position
+                        if global_char_idx == cursor_global_pos {
+                            cursor_display_line = all_lines.len();
+                        }
+
+                        // Determine style
+                        let style = if line_idx == state.cursor_line && i == state.cursor_col {
+                            cursor_style
+                        } else {
+                            text_style
+                        };
+
+                        current_line_spans.push(Span::styled(ch.to_string(), style));
+                        current_line_len += char_width;
+                        global_char_idx += 1;
+                    }
+
+                    // Add cursor at end of this logical line if needed
+                    if line_idx == state.cursor_line && state.cursor_col >= input_chars.len() {
+                        // Check if cursor would overflow current line
+                        if current_line_len + 1 > input_width && current_line_len > 0 {
+                            let mut line_spans = if is_first_wrap {
+                                vec![Span::styled(prefix, prompt_style)]
+                            } else {
+                                vec![Span::styled("  ", prompt_style)]
+                            };
+                            line_spans.extend(std::mem::take(&mut current_line_spans));
+                            all_lines.push(Line::from(line_spans));
+                            current_line_len = 0;
+                            is_first_wrap = false;
+                        }
+                        cursor_display_line = all_lines.len();
+                        current_line_spans.push(Span::styled(" ", cursor_style));
+                        current_line_len += 1;
+                    }
+
+                    // Push remaining spans
+                    if !current_line_spans.is_empty() {
+                        let mut line_spans = if is_first_wrap {
+                            vec![Span::styled(prefix, prompt_style)]
+                        } else {
+                            vec![Span::styled("  ", prompt_style)]
+                        };
+                        line_spans.extend(current_line_spans);
+                        all_lines.push(Line::from(line_spans));
+                    }
+
+                    global_char_idx += 1; // newline
                 }
             }
-            frame.render_widget(Paragraph::new(lines), inner);
+
+            // If no lines, add empty line with cursor
+            if all_lines.is_empty() {
+                all_lines.push(Line::from(vec![
+                    Span::styled("> ", prompt_style),
+                    Span::styled(" ", cursor_style),
+                ]));
+                cursor_display_line = 0;
+            }
+
+            // Scroll to show cursor line (like Handler)
+            let visible_lines: Vec<Line> = if all_lines.len() > max_visible_lines {
+                let scroll_start = if cursor_display_line >= max_visible_lines {
+                    cursor_display_line - max_visible_lines + 1
+                } else {
+                    0
+                };
+                all_lines.into_iter().skip(scroll_start).take(max_visible_lines).collect()
+            } else {
+                all_lines
+            };
+
+            frame.render_widget(Paragraph::new(visible_lines), inner);
         }
     }
 }
@@ -1117,6 +1467,7 @@ fn scroll_down(state: &mut AIScreenState, amount: usize) {
 pub fn handle_input(state: &mut AIScreenState, code: KeyCode, modifiers: KeyModifiers) -> bool {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let alt = modifiers.contains(KeyModifiers::ALT);
 
     match code {
         KeyCode::Esc => {
@@ -1132,8 +1483,8 @@ pub fn handle_input(state: &mut AIScreenState, code: KeyCode, modifiers: KeyModi
             }
         }
         KeyCode::Enter => {
-            if shift || ctrl {
-                // Shift+Enter or Ctrl+Enter: insert newline
+            if shift || ctrl || alt {
+                // Shift+Enter, Ctrl+Enter, or Alt+Enter: insert newline
                 state.insert_newline();
             } else {
                 // Regular Enter: submit
@@ -1227,6 +1578,10 @@ pub fn handle_input(state: &mut AIScreenState, code: KeyCode, modifiers: KeyModi
         KeyCode::Char('k') if ctrl => {
             // Ctrl+K: kill line right
             state.kill_line_right();
+        }
+        KeyCode::Char('j') if ctrl => {
+            // Ctrl+J: insert newline (traditional Unix LF)
+            state.insert_newline();
         }
         KeyCode::Char('w') if ctrl => {
             // Ctrl+W: delete word backwards

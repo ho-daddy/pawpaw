@@ -13,6 +13,7 @@ use crate::services::file_ops::{self, FileOperationType, ProgressMessage, FileOp
 use crate::ui::file_viewer::ViewerState;
 use crate::ui::file_editor::EditorState;
 use crate::ui::file_info::FileInfoState;
+use crate::ui::theme::DEFAULT_THEME_NAME;
 
 /// Encode a command as base64 for safe shell execution
 /// This avoids all shell escaping issues by encoding the entire command
@@ -233,7 +234,7 @@ impl SettingsState {
     }
 
     pub fn current_theme(&self) -> &str {
-        self.themes.get(self.theme_index).map(|s| s.as_str()).unwrap_or("light")
+        self.themes.get(self.theme_index).map(|s| s.as_str()).unwrap_or(DEFAULT_THEME_NAME)
     }
 
     pub fn next_theme(&mut self) {
@@ -894,7 +895,7 @@ impl App {
             needs_full_redraw: false,
             settings: Settings::default(),
             theme: crate::ui::theme::Theme::default(),
-            theme_watch_state: ThemeWatchState::watch_theme("light"),
+            theme_watch_state: ThemeWatchState::watch_theme(DEFAULT_THEME_NAME),
             design_mode: false,
 
             // 새로운 고급 상태

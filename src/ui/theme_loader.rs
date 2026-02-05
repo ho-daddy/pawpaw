@@ -476,8 +476,10 @@ pub struct AIScreenColorsJson {
     pub input_prompt: u8,
     #[serde(default = "default_243")]
     pub input_text: u8,
+    #[serde(default = "default_255")]
+    pub input_cursor_fg: u8,
     #[serde(default = "default_238")]
-    pub input_cursor: u8,
+    pub input_cursor_bg: u8,
     #[serde(default = "default_251")]
     pub input_placeholder: u8,
     #[serde(default = "default_74")]
@@ -486,6 +488,16 @@ pub struct AIScreenColorsJson {
     pub processing_text: u8,
     #[serde(default = "default_198")]
     pub error_text: u8,
+    #[serde(default = "default_136")]
+    pub tool_use_prefix: u8,
+    #[serde(default = "default_67")]
+    pub tool_use_name: u8,
+    #[serde(default = "default_243")]
+    pub tool_use_input: u8,
+    #[serde(default = "default_34")]
+    pub tool_result_prefix: u8,
+    #[serde(default = "default_243")]
+    pub tool_result_text: u8,
     #[serde(default = "default_74")]
     pub footer_key: u8,
     #[serde(default = "default_251")]
@@ -678,6 +690,7 @@ pub struct AdvancedSearchColorsJson {
 fn default_21() -> u8 { 21 }
 fn default_28() -> u8 { 28 }
 fn default_34() -> u8 { 34 }
+fn default_136() -> u8 { 136 }
 fn default_37() -> u8 { 37 }
 fn default_67() -> u8 { 67 }
 fn default_74() -> u8 { 74 }
@@ -990,11 +1003,17 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         input_border: idx(json.ai_screen.input_border),
         input_prompt: idx(json.ai_screen.input_prompt),
         input_text: idx(json.ai_screen.input_text),
-        input_cursor: idx(json.ai_screen.input_cursor),
+        input_cursor_fg: idx(json.ai_screen.input_cursor_fg),
+        input_cursor_bg: idx(json.ai_screen.input_cursor_bg),
         input_placeholder: idx(json.ai_screen.input_placeholder),
         processing_spinner: idx(json.ai_screen.processing_spinner),
         processing_text: idx(json.ai_screen.processing_text),
         error_text: idx(json.ai_screen.error_text),
+        tool_use_prefix: idx(json.ai_screen.tool_use_prefix),
+        tool_use_name: idx(json.ai_screen.tool_use_name),
+        tool_use_input: idx(json.ai_screen.tool_use_input),
+        tool_result_prefix: idx(json.ai_screen.tool_result_prefix),
+        tool_result_text: idx(json.ai_screen.tool_result_text),
         footer_key: idx(json.ai_screen.footer_key),
         footer_text: idx(json.ai_screen.footer_text),
     };

@@ -1,7 +1,24 @@
 use std::process::{Command, Stdio};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
+use std::fs::OpenOptions;
 use regex::Regex;
+use serde_json::Value;
+
+/// Debug logging helper (disabled)
+#[allow(unused_variables)]
+fn debug_log(_msg: &str) {
+    // Disabled - uncomment below to enable debug logging
+    // if let Ok(mut file) = OpenOptions::new()
+    //     .create(true)
+    //     .append(true)
+    //     .open("./debug.log")
+    // {
+    //     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+    //     let _ = writeln!(file, "[{}] [claude] {}", timestamp, _msg);
+    // }
+}
 
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
@@ -9,6 +26,23 @@ pub struct ClaudeResponse {
     pub response: Option<String>,
     pub session_id: Option<String>,
     pub error: Option<String>,
+}
+
+/// Streaming message types for real-time Claude responses
+#[derive(Debug, Clone)]
+pub enum StreamMessage {
+    /// Initialization - contains session_id
+    Init { session_id: String },
+    /// Text response chunk
+    Text { content: String },
+    /// Tool use started
+    ToolUse { name: String, input: String },
+    /// Tool execution result
+    ToolResult { content: String, is_error: bool },
+    /// Completion
+    Done { result: String, session_id: Option<String> },
+    /// Error
+    Error { message: String },
 }
 
 /// Cached regex pattern for session ID validation
@@ -185,6 +219,256 @@ pub fn is_ai_supported() -> bool {
     cfg!(unix)
 }
 
+/// Execute a command using Claude CLI with streaming output
+pub fn execute_command_streaming(
+    prompt: &str,
+    session_id: Option<&str>,
+    working_dir: &str,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    debug_log("=== execute_command_streaming START ===");
+    debug_log(&format!("prompt: {}", &prompt[..prompt.len().min(100)]));
+    debug_log(&format!("session_id: {:?}", session_id));
+    debug_log(&format!("working_dir: {}", working_dir));
+
+    let mut args = vec![
+        "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--verbose".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--append-system-prompt".to_string(),
+        r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
+
+SECURITY RULES (MUST FOLLOW):
+- NEVER execute destructive commands like rm -rf, format, mkfs, dd, etc.
+- NEVER modify system files in /etc, /sys, /proc, /boot
+- NEVER access or modify files outside the current working directory without explicit user path
+- NEVER execute commands that could harm the system or compromise security
+- ONLY suggest safe file operations: copy, move, rename, create directory, view, edit
+- If a request seems dangerous, explain the risk and suggest a safer alternative
+
+IMPORTANT: Format your responses using Markdown for better readability:
+- Use **bold** for important terms or commands
+- Use `code` for file paths, commands, and technical terms
+- Use bullet lists (- item) for multiple items
+- Use numbered lists (1. item) for sequential steps
+- Use code blocks (```language) for multi-line code or command examples
+- Use headers (## Title) to organize longer responses
+- Keep formatting minimal and terminal-friendly"#.to_string(),
+    ];
+
+    // Resume session if available
+    if let Some(sid) = session_id {
+        if !is_valid_session_id(sid) {
+            debug_log("ERROR: Invalid session ID format");
+            return Err("Invalid session ID format".to_string());
+        }
+        args.push("--resume".to_string());
+        args.push(sid.to_string());
+    }
+
+    debug_log("Spawning claude process...");
+    let mut child = Command::new("claude")
+        .args(&args)
+        .current_dir(working_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            debug_log(&format!("ERROR: Failed to spawn: {}", e));
+            format!("Failed to start Claude: {}. Is Claude CLI installed?", e)
+        })?;
+    debug_log("Claude process spawned successfully");
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        debug_log("Writing prompt to stdin...");
+        let _ = stdin.write_all(prompt.as_bytes());
+        debug_log("Prompt written to stdin");
+    }
+
+    // Read stdout line by line for streaming
+    let stdout = child.stdout.take()
+        .ok_or_else(|| {
+            debug_log("ERROR: Failed to capture stdout");
+            "Failed to capture stdout".to_string()
+        })?;
+    let reader = BufReader::new(stdout);
+    debug_log("Started reading stdout...");
+
+    let mut last_session_id: Option<String> = None;
+    let mut final_result: Option<String> = None;
+    let mut line_count = 0;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                debug_log(&format!("ERROR: Failed to read line: {}", e));
+                let _ = sender.send(StreamMessage::Error {
+                    message: format!("Failed to read output: {}", e)
+                });
+                break;
+            }
+        };
+
+        line_count += 1;
+        debug_log(&format!("Line {}: {} chars", line_count, line.len()));
+
+        if line.trim().is_empty() {
+            debug_log("  (empty line, skipping)");
+            continue;
+        }
+
+        if let Ok(json) = serde_json::from_str::<Value>(&line) {
+            let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            debug_log(&format!("  JSON type: {}", msg_type));
+
+            if let Some(msg) = parse_stream_message(&json) {
+                debug_log(&format!("  Parsed message: {:?}", std::mem::discriminant(&msg)));
+
+                // Track session_id and final result for Done message
+                match &msg {
+                    StreamMessage::Init { session_id } => {
+                        debug_log(&format!("  Init with session_id: {}", session_id));
+                        last_session_id = Some(session_id.clone());
+                    }
+                    StreamMessage::Text { content } => {
+                        debug_log(&format!("  Text content: {} chars", content.len()));
+                    }
+                    StreamMessage::ToolUse { name, .. } => {
+                        debug_log(&format!("  ToolUse: {}", name));
+                    }
+                    StreamMessage::ToolResult { is_error, .. } => {
+                        debug_log(&format!("  ToolResult: is_error={}", is_error));
+                    }
+                    StreamMessage::Done { result, session_id } => {
+                        debug_log(&format!("  Done: result={} chars, session_id={:?}", result.len(), session_id));
+                        final_result = Some(result.clone());
+                        if session_id.is_some() {
+                            last_session_id = session_id.clone();
+                        }
+                    }
+                    StreamMessage::Error { message } => {
+                        debug_log(&format!("  Error: {}", message));
+                    }
+                }
+
+                // Send message to channel
+                debug_log("  Sending message to channel...");
+                if sender.send(msg).is_err() {
+                    debug_log("  ERROR: Channel send failed (receiver dropped)");
+                    break;
+                }
+                debug_log("  Message sent successfully");
+            } else {
+                debug_log("  (parse_stream_message returned None)");
+            }
+        } else {
+            debug_log(&format!("  (not valid JSON): {}", &line[..line.len().min(100)]));
+        }
+    }
+
+    debug_log(&format!("Finished reading stdout. Total lines: {}", line_count));
+
+    // Wait for process to finish
+    debug_log("Waiting for process to finish...");
+    let status = child.wait().map_err(|e| {
+        debug_log(&format!("ERROR: Process wait failed: {}", e));
+        format!("Process error: {}", e)
+    })?;
+    debug_log(&format!("Process finished with status: {:?}", status));
+
+    // If we didn't get a proper Done message, send one now
+    if final_result.is_none() {
+        let _ = sender.send(StreamMessage::Done {
+            result: String::new(),
+            session_id: last_session_id,
+        });
+    }
+
+    if !status.success() {
+        return Err(format!("Process exited with code {:?}", status.code()));
+    }
+
+    Ok(())
+}
+
+/// Parse a stream-json line into a StreamMessage
+fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
+    let msg_type = json.get("type")?.as_str()?;
+
+    match msg_type {
+        "system" => {
+            // {"type":"system","subtype":"init","session_id":"..."}
+            let subtype = json.get("subtype").and_then(|v| v.as_str())?;
+            if subtype == "init" {
+                let session_id = json.get("session_id")?.as_str()?.to_string();
+                Some(StreamMessage::Init { session_id })
+            } else {
+                None
+            }
+        }
+        "assistant" => {
+            // {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+            // or {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{...}}]}}
+            let content = json.get("message")?.get("content")?.as_array()?;
+
+            for item in content {
+                let item_type = item.get("type")?.as_str()?;
+                match item_type {
+                    "text" => {
+                        let text = item.get("text")?.as_str()?.to_string();
+                        return Some(StreamMessage::Text { content: text });
+                    }
+                    "tool_use" => {
+                        let name = item.get("name")?.as_str()?.to_string();
+                        let input = item.get("input")
+                            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                            .unwrap_or_default();
+                        return Some(StreamMessage::ToolUse { name, input });
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        "user" => {
+            // {"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]}}
+            let content = json.get("message")?.get("content")?.as_array()?;
+
+            for item in content {
+                let item_type = item.get("type")?.as_str()?;
+                if item_type == "tool_result" {
+                    let content_text = item.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let is_error = item.get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return Some(StreamMessage::ToolResult { content: content_text, is_error });
+                }
+            }
+            None
+        }
+        "result" => {
+            // {"type":"result","subtype":"success","result":"...","session_id":"..."}
+            let result = json.get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let session_id = json.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Some(StreamMessage::Done { result, session_id })
+        }
+        _ => None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +624,105 @@ mod tests {
 
         // Both should point to the same static instance
         assert!(std::ptr::eq(regex1, regex2));
+    }
+
+    // ========== parse_stream_message tests ==========
+
+    #[test]
+    fn test_parse_stream_message_init() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"test-123"}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::Init { session_id }) => {
+                assert_eq!(session_id, "test-123");
+            }
+            _ => panic!("Expected Init message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_text() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::Text { content }) => {
+                assert_eq!(content, "Hello world");
+            }
+            _ => panic!("Expected Text message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_tool_use() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::ToolUse { name, input }) => {
+                assert_eq!(name, "Bash");
+                assert!(input.contains("ls"));
+            }
+            _ => panic!("Expected ToolUse message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_tool_result() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"file.txt","is_error":false}]}}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::ToolResult { content, is_error }) => {
+                assert_eq!(content, "file.txt");
+                assert!(!is_error);
+            }
+            _ => panic!("Expected ToolResult message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_tool_result_error() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Error: not found","is_error":true}]}}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::ToolResult { content, is_error }) => {
+                assert_eq!(content, "Error: not found");
+                assert!(is_error);
+            }
+            _ => panic!("Expected ToolResult message with error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_result() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","result":"Done!","session_id":"sess-456"}"#
+        ).unwrap();
+
+        match parse_stream_message(&json) {
+            Some(StreamMessage::Done { result, session_id }) => {
+                assert_eq!(result, "Done!");
+                assert_eq!(session_id, Some("sess-456".to_string()));
+            }
+            _ => panic!("Expected Done message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_unknown_type() {
+        let json: Value = serde_json::from_str(
+            r#"{"type":"unknown","data":"something"}"#
+        ).unwrap();
+
+        let msg = parse_stream_message(&json);
+        assert!(msg.is_none());
     }
 }

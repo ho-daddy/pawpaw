@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::collections::VecDeque;
 use crossterm::event::{KeyCode, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -291,6 +292,7 @@ impl EditorState {
 
     /// 버퍼 위치(char index) -> Visual Column
     /// TAB 문자는 tab_size 단위로 정렬된 위치까지 확장됨
+    /// Wide characters (한글 등)는 2칸으로 계산됨
     pub fn char_to_visual(&self, line: &str, char_idx: usize) -> usize {
         let mut visual_col = 0;
         for (i, c) in line.chars().enumerate() {
@@ -301,7 +303,7 @@ impl EditorState {
                 // TAB은 다음 tab_size 배수 위치까지 확장
                 visual_col = (visual_col / self.tab_size + 1) * self.tab_size;
             } else {
-                visual_col += 1;
+                visual_col += c.width().unwrap_or(1);
             }
         }
         visual_col
@@ -309,6 +311,7 @@ impl EditorState {
 
     /// Visual Column -> 버퍼 위치(char index)
     /// 주어진 visual column에 해당하는 문자 인덱스를 반환
+    /// Wide characters (한글 등)는 2칸으로 계산됨
     pub fn visual_to_char(&self, line: &str, visual_col: usize) -> usize {
         let mut current_visual = 0;
         for (i, c) in line.chars().enumerate() {
@@ -318,7 +321,7 @@ impl EditorState {
             if c == '\t' {
                 current_visual = (current_visual / self.tab_size + 1) * self.tab_size;
             } else {
-                current_visual += 1;
+                current_visual += c.width().unwrap_or(1);
             }
         }
         line.chars().count()
@@ -335,6 +338,7 @@ impl EditorState {
 
     /// TAB을 visual column 기반으로 확장한 문자열 생성
     /// 각 TAB은 현재 visual column 위치에서 다음 tab_size 배수까지 스페이스로 확장됨
+    /// Wide characters (한글 등)는 2칸으로 계산됨
     pub fn expand_tabs_visual(&self, line: &str) -> String {
         let mut result = String::new();
         let mut visual_col = 0;
@@ -346,7 +350,7 @@ impl EditorState {
                 visual_col = next_tab_stop;
             } else {
                 result.push(c);
-                visual_col += 1;
+                visual_col += c.width().unwrap_or(1);
             }
         }
         result
@@ -355,6 +359,7 @@ impl EditorState {
     /// 원본 문자 인덱스 -> 확장된 visual 인덱스 매핑 생성
     /// 반환값: (확장된 문자열, 원본 인덱스 배열)
     /// 원본 인덱스 배열: expanded_line의 각 visual 위치에 해당하는 원본 char index
+    /// Wide characters (한글 등)는 2칸으로 계산됨
     pub fn expand_tabs_with_mapping(&self, line: &str) -> (String, Vec<usize>) {
         let mut result = String::new();
         let mut visual_to_orig: Vec<usize> = Vec::new();
@@ -370,8 +375,11 @@ impl EditorState {
                 visual_col = next_tab_stop;
             } else {
                 result.push(c);
-                visual_to_orig.push(char_idx);
-                visual_col += 1;
+                let char_width = c.width().unwrap_or(1);
+                for _ in 0..char_width {
+                    visual_to_orig.push(char_idx);
+                }
+                visual_col += char_width;
             }
         }
         (result, visual_to_orig)
