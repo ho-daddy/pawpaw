@@ -3218,6 +3218,10 @@ impl App {
     }
 
     pub fn show_ai_screen(&mut self) {
+        if self.active_panel().is_remote() {
+            self.show_message("AI features are not available for remote panels");
+            return;
+        }
         // 1패널이면 AI용 패널 자동 추가
         if self.panels.len() == 1 {
             let path = self.active_panel().path.clone();
