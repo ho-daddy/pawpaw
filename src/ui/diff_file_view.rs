@@ -547,7 +547,7 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
                 .bg(theme.diff_file_view.bg),
         ),
         Span::styled(
-            "n/N",
+            "n/p",
             Style::default()
                 .fg(theme.diff_file_view.footer_key)
                 .bg(theme.diff_file_view.bg),
@@ -861,19 +861,21 @@ pub fn handle_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
             state.scroll = max_scroll;
         }
         KeyCode::Char('n') => {
-            // Jump to next change position (stop at last)
-            if !state.change_positions.is_empty()
-                && state.current_change + 1 < state.change_positions.len()
-            {
-                state.current_change += 1;
+            // Jump to next change position (or scroll to current if not visible)
+            if !state.change_positions.is_empty() {
+                if state.current_change + 1 < state.change_positions.len() {
+                    state.current_change += 1;
+                }
                 let target = state.change_positions[state.current_change];
                 state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
             }
         }
         KeyCode::Char('N') | KeyCode::Char('p') | KeyCode::Char('P') => {
-            // Jump to previous change position (stop at first)
-            if !state.change_positions.is_empty() && state.current_change > 0 {
-                state.current_change -= 1;
+            // Jump to previous change position (or scroll to current if not visible)
+            if !state.change_positions.is_empty() {
+                if state.current_change > 0 {
+                    state.current_change -= 1;
+                }
                 let target = state.change_positions[state.current_change];
                 state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
             }
