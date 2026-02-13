@@ -1691,7 +1691,7 @@ fn draw_progress_dialog(frame: &mut Frame, app: &App, area: Rect, theme: &Theme)
     let use_determinate = progress.total_files > 0;
 
     if use_determinate {
-        let total_progress = progress.overall_progress();
+        let total_progress = progress.overall_progress().clamp(0.0, 1.0);
         let total_progress_percent = (total_progress * 100.0) as u8;
         let total_filled = (total_progress * bar_width as f64) as usize;
         let total_empty = bar_width.saturating_sub(total_filled);

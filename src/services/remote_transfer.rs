@@ -746,6 +746,9 @@ pub fn transfer_remote_to_remote_with_progress(
     }
 
     // Phase 2: Upload from local temp to target remote
+    // Reset progress counters so progress bar starts from 0% again
+    let _ = tx.send(ProgressMessage::TotalProgress(0, total_files, 0, 0));
+
     let upload_config = TransferConfig {
         direction: TransferDirection::LocalToRemote,
         profile: target_profile,
