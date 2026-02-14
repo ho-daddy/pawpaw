@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion'
-import { Github, Terminal, BookOpen } from 'lucide-react'
+import { Github, BookOpen } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Button from './ui/Button'
+import CodeBlock from './ui/CodeBlock'
 import TerminalPreview from './TerminalPreview'
 
 export default function Hero() {
@@ -61,17 +62,23 @@ export default function Hero() {
         {/* Spacer before CTA */}
         <div className="mb-10" />
 
-        {/* CTA buttons */}
+        {/* Install command */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.4 }}
+          className="max-w-2xl mx-auto mb-6"
+        >
+          <CodeBlock code={`/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)"`} />
+        </motion.div>
+
+        {/* CTA buttons */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8, delay: 0.5 }}
           className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-16"
         >
-          <Button href="#install">
-            <Terminal className="w-5 h-5" />
-            curl ... | bash
-          </Button>
           <Button variant="secondary" href="https://github.com/kstost/cokacdir">
             <Github className="w-5 h-5" />
             View on GitHub
