@@ -6,7 +6,7 @@ import TerminalPreview from './TerminalPreview'
 
 export default function Hero() {
   return (
-    <section className="relative min-h-screen flex flex-col items-center justify-center px-4 py-20 overflow-hidden">
+    <section className="relative flex flex-col items-center justify-center px-4 py-12 sm:py-20 sm:min-h-screen overflow-hidden">
       {/* Animated grid background */}
       <div className="absolute inset-0 grid-background opacity-50" />
 
@@ -20,7 +20,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.1 }}
-          className="text-5xl sm:text-6xl lg:text-7xl font-extrabold mb-6"
+          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold mb-4 sm:mb-6"
         >
           <span className="gradient-text">cokacdir</span>
         </motion.h1>
@@ -30,7 +30,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.2 }}
-          className="text-2xl sm:text-3xl lg:text-4xl font-bold text-white mb-4"
+          className="text-xl sm:text-2xl md:text-3xl lg:text-4xl font-bold text-white mb-3 sm:mb-4"
         >
           Terminal File Manager
           <br />
@@ -42,7 +42,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.25 }}
-          className="text-base sm:text-lg text-zinc-400 mb-4"
+          className="text-sm sm:text-base md:text-lg text-zinc-400 mb-4 px-2"
         >
           An easy terminal explorer for vibe coders who are scared of the terminal
         </motion.p>
@@ -52,7 +52,7 @@ export default function Hero() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 1, delay: 0.4 }}
-          className="mb-16"
+          className="mb-8 sm:mb-16"
         >
           <TerminalPreview />
         </motion.div>
@@ -62,7 +62,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.4 }}
-          className="max-w-6xl mx-auto mb-8"
+          className="max-w-6xl mx-auto mb-6 sm:mb-8"
           id="install"
         >
           <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold mb-4">
@@ -113,11 +113,11 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.5 }}
-          className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-16"
+          className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-8 sm:mb-16"
         >
           <Link
             to="/tutorial"
-            className="inline-flex items-center gap-2 px-8 py-4 rounded-lg bg-accent-cyan text-bg-dark font-bold text-lg hover:bg-accent-cyan/90 shadow-lg shadow-accent-cyan/25 transition-all duration-200"
+            className="inline-flex items-center gap-2 px-6 py-3 sm:px-8 sm:py-4 rounded-lg bg-accent-cyan text-bg-dark font-bold text-base sm:text-lg hover:bg-accent-cyan/90 shadow-lg shadow-accent-cyan/25 transition-all duration-200"
           >
             <BookOpen className="w-5 h-5" />
             Beginner Tutorial
