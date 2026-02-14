@@ -14,7 +14,7 @@ export default function GettingStarted() {
       {lang === 'ko' ? (
         <>
           <p className="text-zinc-400 mb-6 leading-relaxed">
-            cokacdir(코칵디르)는 터미널에서 동작하는 파일 관리 프로그램입니다.
+            cokacdir(코깎디아이알)는 터미널에서 동작하는 파일 관리 프로그램입니다.
             Windows의 파일 탐색기나 macOS의 Finder처럼 폴더를 열고, 파일을 복사하고,
             이름을 바꾸는 등의 작업을 키보드만으로 빠르게 할 수 있습니다.
           </p>
@@ -59,7 +59,7 @@ export default function GettingStarted() {
                   <p className="mb-2">아래 명령어를 터미널에 그대로 복사해서 붙여넣고 Enter를 눌러주세요:</p>
                   <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm">
                     <span className="text-zinc-500">$ </span>
-                    <span className="text-accent-cyan">curl -sL https://cokac.com/cokacdir.sh | bash</span>
+                    <span className="text-accent-cyan">/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)"</span>
                   </div>
                   <p className="mt-2 text-zinc-500 text-xs">설치 프로그램이 자동으로 여러분의 운영체제를 감지하고 알맞은 버전을 다운로드합니다.</p>
                 </div>
@@ -97,7 +97,7 @@ export default function GettingStarted() {
                   <p className="mb-2">Copy and paste this command into your terminal, then press Enter:</p>
                   <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm">
                     <span className="text-zinc-500">$ </span>
-                    <span className="text-accent-cyan">curl -sL https://cokac.com/cokacdir.sh | bash</span>
+                    <span className="text-accent-cyan">/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)"</span>
                   </div>
                   <p className="mt-2 text-zinc-500 text-xs">The installer automatically detects your OS and downloads the appropriate version.</p>
                 </div>

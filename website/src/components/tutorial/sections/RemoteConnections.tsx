@@ -234,8 +234,8 @@ export default function RemoteConnections() {
 
           <h4 className="text-white font-semibold mb-3">연결 해제하기</h4>
           <p className="text-zinc-400 mb-6 leading-relaxed">
-            원격 패널에서 <KeyBadge>Ctrl+E</KeyBadge>를 누르면 서버와의 연결이 해제되고,
-            패널이 로컬(내 컴퓨터) 모드로 돌아갑니다.
+            원격 패널에서 <KeyBadge>/</KeyBadge>를 눌러 로컬 경로로 이동하거나,
+            해당 패널을 닫으면(<KeyBadge>9</KeyBadge>) 서버와의 연결이 종료됩니다.
           </p>
 
           {/* ========== 파일 전송 ========== */}
@@ -282,8 +282,8 @@ export default function RemoteConnections() {
           </TipBox>
 
           <TipBox>
-            파일 전송에는 내부적으로 rsync를 활용합니다. rsync가 설치되어 있으면 대용량 파일도
-            효율적으로 전송됩니다. rsync가 없는 환경에서는 SFTP를 통해 직접 전송합니다.
+            파일 전송에는 내부적으로 rsync를 사용합니다.
+            원격 파일 전송을 하려면 시스템에 rsync가 설치되어 있어야 합니다.
           </TipBox>
         </>
       ) : (
@@ -507,8 +507,8 @@ export default function RemoteConnections() {
 
           <h4 className="text-white font-semibold mb-3">Disconnecting</h4>
           <p className="text-zinc-400 mb-6 leading-relaxed">
-            Press <KeyBadge>Ctrl+E</KeyBadge> in a remote panel to disconnect from the server.
-            The panel switches back to local (your computer) mode.
+            Navigate to a local path using <KeyBadge>/</KeyBadge>, or close the panel
+            with <KeyBadge>9</KeyBadge> to terminate the server connection.
           </p>
 
           {/* ========== File transfer ========== */}
@@ -555,8 +555,8 @@ export default function RemoteConnections() {
           </TipBox>
 
           <TipBox>
-            File transfers use rsync internally for efficiency. If rsync is installed,
-            even large files are transferred efficiently. Without rsync, transfers fall back to direct SFTP.
+            File transfers use rsync internally.
+            rsync must be installed on your system for remote file transfers to work.
           </TipBox>
         </>
       )}

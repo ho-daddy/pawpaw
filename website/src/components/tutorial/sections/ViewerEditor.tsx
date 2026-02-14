@@ -35,7 +35,7 @@ export default function ViewerEditor() {
           <p className="text-zinc-400 mb-6 leading-relaxed">
             cokacdir에는 텍스트 편집기가 내장되어 있어서, 별도 프로그램 없이
             파일을 바로 열어 수정할 수 있습니다.
-            구문 강조, 찾기/바꾸기, 멀티 커서 등 코드 편집에 필요한 기능들을 갖추고 있습니다.
+            구문 강조, 찾기/바꾸기 등 코드 편집에 필요한 기능들을 갖추고 있습니다.
           </p>
 
           {/* ===== 열기/저장/닫기 ===== */}
@@ -116,7 +116,7 @@ export default function ViewerEditor() {
               { key: <><KeyBadge>Shift+Home</KeyBadge> / <KeyBadge>Shift+End</KeyBadge></>, desc: t('Select to line start / end', '줄의 시작/끝까지 선택') },
               { key: <><KeyBadge>Shift+Ctrl+←</KeyBadge> / <KeyBadge>→</KeyBadge></>, desc: t('Select word left / right', '단어 단위로 선택') },
               { key: <KeyBadge>Ctrl+L</KeyBadge>, desc: t('Select entire current line', '현재 줄 전체 선택') },
-              { key: <KeyBadge>Ctrl+D</KeyBadge>, desc: t('Select word at cursor / add next occurrence (multi-cursor)', '커서 위의 단어 선택 / 다음 동일 단어 추가 선택 (멀티 커서)') },
+              { key: <KeyBadge>Ctrl+D</KeyBadge>, desc: t('Select word at cursor', '커서 위의 단어 선택') },
             ])}
             {shortcutTable(t('Delete', '삭제'), [
               { key: <KeyBadge>Ctrl+Backspace</KeyBadge>, desc: t('Delete word before cursor', '커서 앞 단어 삭제') },
@@ -199,19 +199,6 @@ export default function ViewerEditor() {
 
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
-                <KeyBadge>Ctrl+D</KeyBadge>
-                <span className="text-white font-semibold">멀티 커서 (Multi-Cursor)</span>
-              </div>
-              <p className="text-zinc-400 text-sm">
-                커서가 있는 단어 위에서 <KeyBadge>Ctrl+D</KeyBadge>를 반복해서 누르면
-                같은 단어가 있는 위치마다 커서가 추가됩니다.
-                이 상태에서 타이핑하면 모든 위치가 동시에 수정됩니다.
-                변수 이름을 일괄 변경할 때 유용합니다.
-              </p>
-            </div>
-
-            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>Ctrl+W</KeyBadge>
                 <span className="text-white font-semibold">줄 바꿈 (Word Wrap)</span>
               </div>
@@ -256,7 +243,7 @@ export default function ViewerEditor() {
           <p className="text-zinc-400 mb-6 leading-relaxed">
             cokacdir includes a built-in text editor, so you can open and modify files
             without any external programs.
-            It features syntax highlighting, find & replace, multi-cursor editing, and more.
+            It features syntax highlighting, find & replace, and more.
           </p>
 
           {/* ===== Open / Save / Close ===== */}
@@ -337,7 +324,7 @@ export default function ViewerEditor() {
               { key: <><KeyBadge>Shift+Home</KeyBadge> / <KeyBadge>Shift+End</KeyBadge></>, desc: 'Select to line start / end' },
               { key: <><KeyBadge>Shift+Ctrl+←</KeyBadge> / <KeyBadge>→</KeyBadge></>, desc: 'Select word left / right' },
               { key: <KeyBadge>Ctrl+L</KeyBadge>, desc: 'Select entire current line' },
-              { key: <KeyBadge>Ctrl+D</KeyBadge>, desc: 'Select word at cursor / add next occurrence (multi-cursor)' },
+              { key: <KeyBadge>Ctrl+D</KeyBadge>, desc: 'Select word at cursor' },
             ])}
             {shortcutTable('Delete', [
               { key: <KeyBadge>Ctrl+Backspace</KeyBadge>, desc: 'Delete word before cursor' },
@@ -411,18 +398,6 @@ export default function ViewerEditor() {
               <p className="text-zinc-500 text-xs">
                 Supported: Rust, Python, JavaScript, TypeScript, C/C++, Java, Go, HTML, CSS, JSON, YAML, TOML,
                 Markdown, Shell, SQL, XML, Ruby, PHP, Swift, Kotlin, and more (20+ languages)
-              </p>
-            </div>
-
-            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <KeyBadge>Ctrl+D</KeyBadge>
-                <span className="text-white font-semibold">Multi-Cursor</span>
-              </div>
-              <p className="text-zinc-400 text-sm">
-                Press <KeyBadge>Ctrl+D</KeyBadge> repeatedly on a word to add cursors at each
-                occurrence of that word. Then type to edit all locations simultaneously.
-                Great for renaming variables across a file.
               </p>
             </div>
 
