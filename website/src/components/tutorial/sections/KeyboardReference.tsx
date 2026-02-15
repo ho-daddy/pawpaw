@@ -161,7 +161,7 @@ export default function KeyboardReference() {
 
           <TipBox variant="note">
             위 단축키들은 기본 설정입니다. 모든 단축키를 원하는 키로 바꿀 수 있습니다.
-            자세한 방법은 위의 <a href="#keybinding-custom" className="text-accent-cyan underline underline-offset-2 hover:text-accent-cyan/80">단축키 커스터마이징</a> 섹션을 참고하세요.
+            자세한 방법은 위의 <button onClick={() => document.getElementById('keybinding-custom')?.scrollIntoView({ behavior: 'smooth' })} className="text-accent-cyan underline underline-offset-2 hover:text-accent-cyan/80">단축키 커스터마이징</button> 섹션을 참고하세요.
           </TipBox>
 
           <div className="mt-8 p-6 bg-bg-card border border-zinc-800 rounded-lg text-center">
