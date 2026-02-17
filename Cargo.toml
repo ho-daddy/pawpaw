@@ -38,6 +38,7 @@ russh = "0.46"
 russh-sftp = "2.0"
 russh-keys = "0.46"
 async-trait = "0.1"
+ratatui-image = { version = "2.0", default-features = false, features = ["rustix", "image-defaults", "crossterm"] }
 
 [dev-dependencies]
 tempfile = "3"

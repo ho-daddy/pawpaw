@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use ratatui_image::protocol::StatefulProtocol;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -74,6 +75,10 @@ pub struct ImageViewerState {
     pub is_loading: bool,
     /// Receiver for async image loading result
     receiver: Option<Receiver<ImageLoadResult>>,
+    /// Inline image protocol state (Kitty/iTerm2/Sixel)
+    pub inline_protocol: Option<Box<dyn StatefulProtocol>>,
+    /// Whether using inline image protocol (vs halfblocks)
+    pub use_inline: bool,
 }
 
 impl ImageViewerState {
@@ -92,6 +97,8 @@ impl ImageViewerState {
             current_index,
             is_loading: true,
             receiver: None,
+            inline_protocol: None,
+            use_inline: false,
         };
 
         // Start async image loading
@@ -244,6 +251,8 @@ impl ImageViewerState {
         self.current_index = index;
         // Reset view when switching images
         self.reset_view();
+        // Reset inline protocol for new image
+        self.inline_protocol = None;
         // Start async loading
         self.start_loading(&new_path);
         true
@@ -353,8 +362,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .unwrap_or_else(|| "Image".to_string());
 
     let position_info = state.get_position_info();
+    let use_inline = state.use_inline;
+    let img_dimensions = state.image.as_ref().map(|img| (img.width(), img.height()));
+    let font_size = app.image_picker.as_ref().map(|p| p.font_size);
     let title = if let Some(ref img) = state.image {
-        if position_info.is_empty() {
+        if use_inline {
+            // Inline protocol: no zoom info
+            if position_info.is_empty() {
+                format!(" {} ({}x{}) ", filename, img.width(), img.height())
+            } else {
+                format!(" {} [{}] ({}x{}) ", filename, position_info, img.width(), img.height())
+            }
+        } else if position_info.is_empty() {
             format!(" {} ({}x{}) - {:.0}% ", filename, img.width(), img.height(), state.zoom * 100.0)
         } else {
             format!(" {} [{}] ({}x{}) - {:.0}% ", filename, position_info, img.width(), img.height(), state.zoom * 100.0)
@@ -410,8 +429,36 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         return;
     }
 
-    if let Some(ref img) = state.image {
-        render_image(frame, img, inner, state.zoom, state.offset_x, state.offset_y);
+    // Render image (need mutable borrow for inline protocol)
+    // Release immutable state borrow, then re-borrow mutably
+    let _ = state;
+    if let Some(ref mut state) = app.image_viewer_state {
+        if let Some(ref mut protocol) = state.inline_protocol {
+            // Inline protocol rendering (Kitty/iTerm2/Sixel) — centered
+            let render_area = if let (Some((img_w, img_h)), Some((fw, fh))) = (img_dimensions, font_size) {
+                // Natural cell size (image at 1:1 pixel mapping)
+                let natural_cols = img_w as f64 / fw as f64;
+                let natural_rows = img_h as f64 / fh as f64;
+                // Scale to fit area, but Resize::Fit won't upscale, so cap at 1.0
+                let scale = (inner.width as f64 / natural_cols)
+                    .min(inner.height as f64 / natural_rows)
+                    .min(1.0);
+                let fit_cols = (natural_cols * scale).floor().max(1.0) as u16;
+                let fit_rows = (natural_rows * scale).floor().max(1.0) as u16;
+                let fit_cols = fit_cols.min(inner.width);
+                let fit_rows = fit_rows.min(inner.height);
+                let off_x = (inner.width.saturating_sub(fit_cols)) / 2;
+                let off_y = (inner.height.saturating_sub(fit_rows)) / 2;
+                Rect::new(inner.x + off_x, inner.y + off_y, fit_cols, fit_rows)
+            } else {
+                inner
+            };
+            let image_widget = ratatui_image::StatefulImage::new(None);
+            frame.render_stateful_widget(image_widget, render_area, protocol);
+        } else if let Some(ref img) = state.image {
+            // Halfblock fallback rendering (existing code)
+            render_image(frame, img, inner, state.zoom, state.offset_x, state.offset_y);
+        }
     }
 
     // Help line at bottom (keybindings에서 동적으로)
@@ -420,14 +467,23 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let help_area = Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, 1);
     let fk = Style::default().fg(theme.image_viewer.footer_key);
     let ft = Style::default().fg(theme.image_viewer.footer_text);
-    let shortcuts: Vec<(String, &str)> = vec![
-        (kb.image_viewer_first_key(ImageViewerAction::PrevImage).to_string(), "prev "),
-        (kb.image_viewer_first_key(ImageViewerAction::NextImage).to_string(), "next "),
-        (kb.image_viewer_first_key(ImageViewerAction::ZoomIn).to_string(), "zoom+ "),
-        (kb.image_viewer_first_key(ImageViewerAction::ZoomOut).to_string(), "zoom- "),
-        (kb.image_viewer_first_key(ImageViewerAction::ResetView).to_string(), "reset "),
-        (kb.image_viewer_first_key(ImageViewerAction::Close).to_string(), "close"),
-    ];
+    let shortcuts: Vec<(String, &str)> = if use_inline {
+        // Inline mode: no zoom/pan shortcuts
+        vec![
+            (kb.image_viewer_first_key(ImageViewerAction::PrevImage).to_string(), "prev "),
+            (kb.image_viewer_first_key(ImageViewerAction::NextImage).to_string(), "next "),
+            (kb.image_viewer_first_key(ImageViewerAction::Close).to_string(), "close"),
+        ]
+    } else {
+        vec![
+            (kb.image_viewer_first_key(ImageViewerAction::PrevImage).to_string(), "prev "),
+            (kb.image_viewer_first_key(ImageViewerAction::NextImage).to_string(), "next "),
+            (kb.image_viewer_first_key(ImageViewerAction::ZoomIn).to_string(), "zoom+ "),
+            (kb.image_viewer_first_key(ImageViewerAction::ZoomOut).to_string(), "zoom- "),
+            (kb.image_viewer_first_key(ImageViewerAction::ResetView).to_string(), "reset "),
+            (kb.image_viewer_first_key(ImageViewerAction::Close).to_string(), "close"),
+        ]
+    };
     let mut help_spans = Vec::new();
     for (key, label) in &shortcuts {
         help_spans.push(Span::styled(key.as_str(), fk));
@@ -546,25 +602,39 @@ pub fn handle_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.image_viewer_state = None;
             }
             ImageViewerAction::ZoomIn => {
-                state.zoom_in();
+                if !state.use_inline {
+                    state.zoom_in();
+                }
             }
             ImageViewerAction::ZoomOut => {
-                state.zoom_out();
+                if !state.use_inline {
+                    state.zoom_out();
+                }
             }
             ImageViewerAction::ResetView => {
-                state.reset_view();
+                if !state.use_inline {
+                    state.reset_view();
+                }
             }
             ImageViewerAction::PanUp => {
-                state.pan(0, 5);
+                if !state.use_inline {
+                    state.pan(0, 5);
+                }
             }
             ImageViewerAction::PanDown => {
-                state.pan(0, -5);
+                if !state.use_inline {
+                    state.pan(0, -5);
+                }
             }
             ImageViewerAction::PanLeft => {
-                state.pan(5, 0);
+                if !state.use_inline {
+                    state.pan(5, 0);
+                }
             }
             ImageViewerAction::PanRight => {
-                state.pan(-5, 0);
+                if !state.use_inline {
+                    state.pan(-5, 0);
+                }
             }
             ImageViewerAction::PrevImage => {
                 state.navigate_prev();

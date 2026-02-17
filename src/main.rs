@@ -221,12 +221,21 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    // Detect terminal image protocol (must be after alternate screen, before event loop)
+    let picker = {
+        let mut p = ratatui_image::picker::Picker::from_termios()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::new((8, 16)));
+        p.guess_protocol();
+        p
+    };
+
     // Load settings and create app state
     let (settings, settings_error) = match config::Settings::load_with_error() {
         Ok(s) => (s, None),
         Err(e) => (config::Settings::default(), Some(e)),
     };
     let mut app = App::with_settings(settings);
+    app.image_picker = Some(picker);
     app.design_mode = design_mode;
 
     // Override panels with command-line paths if provided
@@ -423,7 +432,18 @@ fn run_app<B: ratatui::backend::Backend>(
         // Poll for image loading if on ImageViewer screen
         if app.current_screen == Screen::ImageViewer {
             if let Some(ref mut state) = app.image_viewer_state {
+                let was_loading = state.is_loading;
                 state.poll();
+                // Create inline protocol when loading completes
+                if was_loading && !state.is_loading && state.image.is_some() {
+                    if let Some(ref mut picker) = app.image_picker {
+                        if picker.protocol_type != ratatui_image::picker::ProtocolType::Halfblocks {
+                            let img = state.image.as_ref().expect("checked above").clone();
+                            state.inline_protocol = Some(picker.new_resize_protocol(img));
+                            state.use_inline = true;
+                        }
+                    }
+                }
             }
         }
 

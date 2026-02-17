@@ -1382,6 +1382,9 @@ pub struct App {
     // Image viewer state
     pub image_viewer_state: Option<crate::ui::image_viewer::ImageViewerState>,
 
+    // Image protocol picker (for inline image rendering: Kitty/iTerm2/Sixel)
+    pub image_picker: Option<ratatui_image::picker::Picker>,
+
     // Pending large image path (for confirmation dialog)
     pub pending_large_image: Option<std::path::PathBuf>,
 
@@ -1500,6 +1503,7 @@ impl App {
             system_info_state: crate::ui::system_info::SystemInfoState::default(),
             advanced_search_state: crate::ui::advanced_search::AdvancedSearchState::default(),
             image_viewer_state: None,
+            image_picker: None,
             pending_large_image: None,
             pending_large_file: None,
             pending_binary_file: None,
@@ -1601,6 +1605,7 @@ impl App {
             system_info_state: crate::ui::system_info::SystemInfoState::default(),
             advanced_search_state: crate::ui::advanced_search::AdvancedSearchState::default(),
             image_viewer_state: None,
+            image_picker: None,
             pending_large_image: None,
             pending_large_file: None,
             pending_binary_file: None,
@@ -2075,8 +2080,12 @@ impl App {
                         });
                     }
                 } else if is_image {
-                    // Check true color support for images
-                    if !crate::ui::image_viewer::supports_true_color() {
+                    // Skip true color check if inline image protocol is available
+                    let has_inline = self.image_picker
+                        .as_ref()
+                        .map(|p| p.protocol_type != ratatui_image::picker::ProtocolType::Halfblocks)
+                        .unwrap_or(false);
+                    if !has_inline && !crate::ui::image_viewer::supports_true_color() {
                         self.pending_large_image = Some(path);
                         self.dialog = Some(Dialog {
                             dialog_type: DialogType::TrueColorWarning,
@@ -2861,8 +2870,12 @@ impl App {
 
                 // Check if it's an image file
                 if crate::ui::image_viewer::is_image_file(&path) {
-                    // Check true color support first
-                    if !crate::ui::image_viewer::supports_true_color() {
+                    // Skip true color check if inline image protocol is available
+                    let has_inline = self.image_picker
+                        .as_ref()
+                        .map(|p| p.protocol_type != ratatui_image::picker::ProtocolType::Halfblocks)
+                        .unwrap_or(false);
+                    if !has_inline && !crate::ui::image_viewer::supports_true_color() {
                         self.pending_large_image = Some(path);
                         self.dialog = Some(Dialog {
                             dialog_type: DialogType::TrueColorWarning,
