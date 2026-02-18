@@ -3,7 +3,11 @@ import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { ArrowLeft, Github, Cloud, Server, Bot, Terminal, Copy, Check, Monitor, Apple, Rocket, MessageCircle } from 'lucide-react'
 
-function CopyBlock({ code, label }: { code: string; label?: string }) {
+function Hl({ children }: { children: React.ReactNode }) {
+  return <span className="text-yellow-400 bg-yellow-400/10 rounded px-0.5">{children}</span>
+}
+
+function CopyBlock({ code, label, children }: { code: string; label?: string; children?: React.ReactNode }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = async () => {
     try {
@@ -18,7 +22,7 @@ function CopyBlock({ code, label }: { code: string; label?: string }) {
       <div className="relative group bg-bg-card border border-zinc-800 rounded-lg overflow-hidden hover:border-accent-cyan/30 transition-colors">
         <div className="flex items-start justify-between px-4 py-3 gap-2">
           <pre className="overflow-x-auto min-w-0 flex-1 font-mono text-accent-cyan text-xs sm:text-sm whitespace-pre leading-relaxed">
-            {code}
+            {children || code}
           </pre>
           <button
             onClick={handleCopy}
@@ -274,11 +278,9 @@ export default function EC2Page() {
               <p className="text-zinc-400 text-sm mb-3">
                 credential 폴더를 우클릭 → <strong className="text-zinc-200">Services</strong> → <strong className="text-zinc-200">New Terminal at Folder</strong>
               </p>
-              <CopyBlock code={`export PEM=secret.pem
-export IP=***REMOVED***
-export TOKEN=***REMOVED***
-export URL=https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh
-ssh -t -i "$PEM" ubuntu@$IP "bash -ic \\"source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude\\""` } label="macOS Terminal" />
+              <CopyBlock code={`export PEM=secret.pem\nexport IP=0.0.0.0\nexport TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz\nexport URL=https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh\nssh -t -i "$PEM" ubuntu@$IP "bash -ic \\"source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude\\""`} label="macOS Terminal">
+{`export PEM=`}<Hl>secret.pem</Hl>{`\nexport IP=`}<Hl>0.0.0.0</Hl>{`\nexport TOKEN=`}<Hl>123456789:ABCdefGHIjklMNOpqrsTUVwxyz</Hl>{`\nexport URL=https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh\nssh -t -i "$PEM" ubuntu@$IP "bash -ic \\"source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude\\""`}
+              </CopyBlock>
             </div>
 
             {/* Windows */}
@@ -290,11 +292,9 @@ ssh -t -i "$PEM" ubuntu@$IP "bash -ic \\"source <(curl -sL $URL) > /dev/null 2>&
               <p className="text-zinc-400 text-sm mb-3">
                 credential 폴더를 우클릭 → <strong className="text-zinc-200">터미널에서 열기</strong>
               </p>
-              <CopyBlock code={`$PEM = "secret.pem"; \`
-$IP = "13.209.64.230"; \`
-$TOKEN = "***REMOVED***"; \`
-$URL = "https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh"; \`
-ssh -t -i $PEM ubuntu@$IP "bash -ic 'source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude'"` } label="PowerShell" />
+              <CopyBlock code={`$PEM = "secret.pem"; \`\n$IP = "0.0.0.0"; \`\n$TOKEN = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"; \`\n$URL = "https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh"; \`\nssh -t -i $PEM ubuntu@$IP "bash -ic 'source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude'"`} label="PowerShell">
+{`$PEM = "`}<Hl>secret.pem</Hl>{`"; \`\n$IP = "`}<Hl>0.0.0.0</Hl>{`"; \`\n$TOKEN = "`}<Hl>123456789:ABCdefGHIjklMNOpqrsTUVwxyz</Hl>{`"; \`\n$URL = "https://raw.githubusercontent.com/kstost/service-setup-cokacdir/refs/heads/main/basic_setup_ec2.sh"; \`\nssh -t -i $PEM ubuntu@$IP "bash -ic 'source <(curl -sL $URL) > /dev/null 2>&1 && npx -y service-setup-cokacdir $TOKEN && claude'"`}
+              </CopyBlock>
             </div>
 
             <div className="mt-4 p-4 rounded-lg border border-accent-cyan/20 bg-accent-cyan/5">
