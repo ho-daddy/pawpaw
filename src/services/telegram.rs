@@ -849,6 +849,24 @@ async fn handle_text_message(
     // Pass user input directly
     let context_prompt = sanitized_input;
 
+    // Build disabled tools notice
+    let default_tools: std::collections::HashSet<&str> = DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
+    let allowed_set: std::collections::HashSet<&str> = allowed_tools.iter().map(|s| s.as_str()).collect();
+    let disabled: Vec<&&str> = default_tools.iter().filter(|t| !allowed_set.contains(**t)).collect();
+    let disabled_notice = if disabled.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
+        format!(
+            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
+             You MUST NOT attempt to use these tools. \
+             If a user's request requires a disabled tool, do NOT proceed with the task. \
+             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
+             Suggest they re-enable it with: /allowed +ToolName",
+            names.join(", ")
+        )
+    };
+
     // Build system prompt with sendfile instructions
     let system_prompt_owned = format!(
         "You are chatting with a user through Telegram.\n\
@@ -863,8 +881,8 @@ async fn handle_text_message(
          The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
          IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.",
-        current_path, chat_id.0, bot.token()
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}",
+        current_path, chat_id.0, bot.token(), disabled_notice
     );
 
     // Create channel for streaming
