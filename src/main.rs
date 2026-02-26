@@ -321,6 +321,17 @@ fn handle_cron_context(args: &[String]) {
     match claude::extract_context_summary(&ctx.session_id, &ctx.prompt, &ctx.current_path) {
         Ok(summary) => {
             cron_debug(&format!("  Context summary extracted in {:?}, len={}", extract_start.elapsed(), summary.len()));
+
+            // 실행 중 삭제된 스케줄 부활 방지: 파일이 아직 존재하는지 확인
+            if let Some(home) = dirs::home_dir() {
+                let path = home.join(".cokacdir").join("schedule").join(format!("{}.json", ctx.id));
+                if !path.exists() {
+                    cron_debug(&format!("  Schedule {} already deleted, skipping context_summary write", ctx.id));
+                    cron_debug("=== handle_cron_context END ===");
+                    return;
+                }
+            }
+
             telegram::write_schedule_entry_pub(&telegram::ScheduleEntryData {
                 id: ctx.id.clone(),
                 chat_id: ctx.chat_id,
@@ -348,7 +359,9 @@ fn handle_cron_context(args: &[String]) {
 fn handle_cron_list(chat_id: i64, hash_key: &str) {
     use services::telegram;
 
+    cron_debug(&format!("[handle_cron_list] chat_id={}, hash_key={}", chat_id, hash_key));
     let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
+    cron_debug(&format!("[handle_cron_list] found {} entries", entries.len()));
     let items: Vec<serde_json::Value> = entries.iter().map(|e| {
         serde_json::json!({
             "id": e.id,
@@ -363,16 +376,20 @@ fn handle_cron_list(chat_id: i64, hash_key: &str) {
 fn handle_cron_remove(id: &str, chat_id: i64, hash_key: &str) {
     use services::telegram;
 
+    cron_debug(&format!("[handle_cron_remove] id={}, chat_id={}, hash_key={}", id, chat_id, hash_key));
     // Verify ownership
     let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
     if !entries.iter().any(|e| e.id == id) {
+        cron_debug(&format!("[handle_cron_remove] id={}, not found or access denied", id));
         eprintln!("{}", serde_json::json!({"status":"error","message":format!("schedule not found or access denied: {}", id)}));
         std::process::exit(1);
     }
 
     if telegram::delete_schedule_entry_pub(id) {
+        cron_debug(&format!("[handle_cron_remove] id={}, deleted successfully", id));
         println!("{}", serde_json::json!({"status":"ok","id":id}));
     } else {
+        cron_debug(&format!("[handle_cron_remove] id={}, delete failed", id));
         eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to remove schedule: {}", id)}));
         std::process::exit(1);
     }
@@ -381,22 +398,28 @@ fn handle_cron_remove(id: &str, chat_id: i64, hash_key: &str) {
 fn handle_cron_update(id: &str, at_value: &str, chat_id: i64, hash_key: &str) {
     use services::telegram;
 
+    cron_debug(&format!("[handle_cron_update] id={}, at_value={:?}, chat_id={}, hash_key={}", id, at_value, chat_id, hash_key));
     // Find the entry
     let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
     let entry = entries.iter().find(|e| e.id == id);
     let Some(entry) = entry else {
+        cron_debug(&format!("[handle_cron_update] id={}, not found or access denied", id));
         eprintln!("{}", serde_json::json!({"status":"error","message":format!("schedule not found or access denied: {}", id)}));
         std::process::exit(1);
     };
 
     // Parse new schedule value
     let (schedule_type, schedule_value) = if let Some(dt) = telegram::parse_relative_time_pub(at_value) {
+        cron_debug(&format!("[handle_cron_update] id={}, parsed as relative → absolute: {}", id, dt.format("%Y-%m-%d %H:%M:%S")));
         ("absolute".to_string(), dt.format("%Y-%m-%d %H:%M:%S").to_string())
     } else if at_value.split_whitespace().count() == 5 {
+        cron_debug(&format!("[handle_cron_update] id={}, parsed as cron: {}", id, at_value));
         ("cron".to_string(), at_value.to_string())
     } else if chrono::NaiveDateTime::parse_from_str(at_value, "%Y-%m-%d %H:%M:%S").is_ok() {
+        cron_debug(&format!("[handle_cron_update] id={}, parsed as absolute datetime: {}", id, at_value));
         ("absolute".to_string(), at_value.to_string())
     } else {
+        cron_debug(&format!("[handle_cron_update] id={}, invalid --at value: {:?}", id, at_value));
         eprintln!("{}", serde_json::json!({"status":"error","message":format!("invalid --at value: {}", at_value)}));
         std::process::exit(1);
     };
@@ -407,11 +430,14 @@ fn handle_cron_update(id: &str, at_value: &str, chat_id: i64, hash_key: &str) {
     updated.schedule_type = schedule_type.clone();
     updated.last_run = None; // Reset last_run so it triggers again
 
+    cron_debug(&format!("[handle_cron_update] id={}, writing: type={}, schedule={}, last_run=None", id, schedule_type, schedule_value));
     telegram::write_schedule_entry_pub(&updated).unwrap_or_else(|e| {
+        cron_debug(&format!("[handle_cron_update] id={}, write failed: {}", id, e));
         eprintln!("{}", serde_json::json!({"status":"error","message":format!("{}", e)}));
         std::process::exit(1);
     });
 
+    cron_debug(&format!("[handle_cron_update] id={}, updated successfully", id));
     println!("{}", serde_json::json!({"status":"ok","id":id,"schedule":schedule_value}));
 }
 

@@ -124,16 +124,33 @@ struct ScheduleEntry {
 
 /// Directory for schedule files: ~/.cokacdir/schedule/
 fn schedule_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cokacdir").join("schedule"))
+    let result = dirs::home_dir().map(|h| h.join(".cokacdir").join("schedule"));
+    sched_debug(&format!("[schedule_dir] → {:?}", result));
+    result
 }
 
-
+fn sched_debug(msg: &str) {
+    crate::services::claude::debug_log_to("cron.log", msg);
+}
 
 /// Read a single schedule entry from a JSON file
 fn read_schedule_entry(path: &std::path::Path) -> Option<ScheduleEntry> {
-    let content = fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    Some(ScheduleEntry {
+    sched_debug(&format!("[read_schedule_entry] reading: {}", path.display()));
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            sched_debug(&format!("[read_schedule_entry] read failed: {}", e));
+            return None;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            sched_debug(&format!("[read_schedule_entry] parse failed: {}", e));
+            return None;
+        }
+    };
+    let entry = Some(ScheduleEntry {
         id: v.get("id")?.as_str()?.to_string(),
         chat_id: v.get("chat_id")?.as_i64()?,
         bot_key: v.get("bot_key")?.as_str()?.to_string(),
@@ -145,11 +162,20 @@ fn read_schedule_entry(path: &std::path::Path) -> Option<ScheduleEntry> {
         last_run: v.get("last_run").and_then(|v| v.as_str()).map(String::from),
         created_at: v.get("created_at")?.as_str()?.to_string(),
         context_summary: v.get("context_summary").and_then(|v| v.as_str()).map(String::from),
-    })
+    });
+    sched_debug(&format!("[read_schedule_entry] result: id={}, type={}, schedule={}, last_run={:?}",
+        entry.as_ref().map(|e| e.id.as_str()).unwrap_or("?"),
+        entry.as_ref().map(|e| e.schedule_type.as_str()).unwrap_or("?"),
+        entry.as_ref().map(|e| e.schedule.as_str()).unwrap_or("?"),
+        entry.as_ref().and_then(|e| e.last_run.as_deref()),
+    ));
+    entry
 }
 
 /// Write a schedule entry to its JSON file
 fn write_schedule_entry(entry: &ScheduleEntry) -> Result<(), String> {
+    sched_debug(&format!("[write_schedule_entry] id={}, type={}, schedule={}, once={}, last_run={:?}",
+        entry.id, entry.schedule_type, entry.schedule, entry.once, entry.last_run));
     let dir = schedule_dir().ok_or("Cannot determine home directory")?;
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create schedule dir: {e}"))?;
     let json = serde_json::json!({
@@ -167,16 +193,27 @@ fn write_schedule_entry(entry: &ScheduleEntry) -> Result<(), String> {
     });
     let path = dir.join(format!("{}.json", entry.id));
     let tmp_path = dir.join(format!("{}.json.tmp", entry.id));
+    sched_debug(&format!("[write_schedule_entry] writing tmp: {}", tmp_path.display()));
     fs::write(&tmp_path, serde_json::to_string_pretty(&json).unwrap_or_default())
         .map_err(|e| format!("Failed to write schedule file: {e}"))?;
-    fs::rename(&tmp_path, &path)
-        .map_err(|e| format!("Failed to finalize schedule file: {e}"))
+    sched_debug(&format!("[write_schedule_entry] atomic rename: {} → {}", tmp_path.display(), path.display()));
+    let result = fs::rename(&tmp_path, &path)
+        .map_err(|e| format!("Failed to finalize schedule file: {e}"));
+    sched_debug(&format!("[write_schedule_entry] result: {:?}", result));
+    result
 }
 
 /// List all schedule entries matching the given bot_key and optionally chat_id
 fn list_schedule_entries(bot_key: &str, chat_id: Option<i64>) -> Vec<ScheduleEntry> {
-    let Some(dir) = schedule_dir() else { return Vec::new() };
-    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
+    sched_debug(&format!("[list_schedule_entries] bot_key={}, chat_id={:?}", bot_key, chat_id));
+    let Some(dir) = schedule_dir() else {
+        sched_debug("[list_schedule_entries] no schedule dir");
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        sched_debug("[list_schedule_entries] read_dir failed");
+        return Vec::new();
+    };
     let mut result: Vec<ScheduleEntry> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
@@ -185,30 +222,58 @@ fn list_schedule_entries(bot_key: &str, chat_id: Option<i64>) -> Vec<ScheduleEnt
         .filter(|e| chat_id.map_or(true, |cid| e.chat_id == cid))
         .collect();
     result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    sched_debug(&format!("[list_schedule_entries] found {} entries: [{}]",
+        result.len(),
+        result.iter().map(|e| format!("{}({})", e.id, e.schedule_type)).collect::<Vec<_>>().join(", ")));
     result
 }
 
 /// Delete a schedule entry by ID
 fn delete_schedule_entry(id: &str) -> bool {
-    let Some(dir) = schedule_dir() else { return false };
+    sched_debug(&format!("[delete_schedule_entry] id={}", id));
+    let Some(dir) = schedule_dir() else {
+        sched_debug("[delete_schedule_entry] no schedule dir");
+        return false;
+    };
     let path = dir.join(format!("{id}.json"));
-    fs::remove_file(&path).is_ok()
+    let existed = path.exists();
+    let ok = fs::remove_file(&path).is_ok();
+    sched_debug(&format!("[delete_schedule_entry] path={}, existed={}, removed={}", path.display(), existed, ok));
+    ok
 }
 
 /// Parse a relative time string (e.g. "4h", "30m", "1d") into a future DateTime
 fn parse_relative_time(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    sched_debug(&format!("[parse_relative_time] input: {:?}", s));
     let s = s.trim();
-    if s.len() < 2 { return None; }
+    if s.len() < 2 {
+        sched_debug("[parse_relative_time] too short → None");
+        return None;
+    }
     let (num_part, unit) = s.split_at(s.len() - 1);
-    let num: i64 = num_part.parse().ok()?;
-    if num <= 0 { return None; }
+    let num: i64 = match num_part.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            sched_debug(&format!("[parse_relative_time] invalid number: {:?} → None", num_part));
+            return None;
+        }
+    };
+    if num <= 0 {
+        sched_debug("[parse_relative_time] num <= 0 → None");
+        return None;
+    }
     let seconds = match unit {
         "m" => num * 60,
         "h" => num * 3600,
         "d" => num * 86400,
-        _ => return None,
+        _ => {
+            sched_debug(&format!("[parse_relative_time] unknown unit: {:?} → None", unit));
+            return None;
+        }
     };
-    Some(chrono::Local::now() + chrono::Duration::seconds(seconds))
+    let result = Some(chrono::Local::now() + chrono::Duration::seconds(seconds));
+    sched_debug(&format!("[parse_relative_time] → {:?}", result.as_ref().map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())));
+    result
 }
 
 /// Check if a cron expression matches the given datetime.
@@ -218,7 +283,10 @@ fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
     use chrono::Timelike;
 
     let fields: Vec<&str> = expr.split_whitespace().collect();
-    if fields.len() != 5 { return false; }
+    if fields.len() != 5 {
+        sched_debug(&format!("[cron_matches] invalid field count: {} (expected 5) for expr={:?}", fields.len(), expr));
+        return false;
+    }
 
     let values = [
         dt.minute(),
@@ -227,15 +295,20 @@ fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
         dt.month(),
         dt.weekday().num_days_from_sunday(),
     ];
+    let field_names = ["minute", "hour", "day", "month", "dow"];
 
     // Range start for each field: minute(0), hour(0), day-of-month(1), month(1), day-of-week(0)
     let range_starts = [0u32, 0, 1, 1, 0];
 
-    for ((field, &val), &range_start) in fields.iter().zip(values.iter()).zip(range_starts.iter()) {
-        if !cron_field_matches(field, val, range_start) {
+    for (i, ((field, &val), &range_start)) in fields.iter().zip(values.iter()).zip(range_starts.iter()).enumerate() {
+        let matched = cron_field_matches(field, val, range_start);
+        if !matched {
+            sched_debug(&format!("[cron_matches] expr={:?}, dt={}, {}({})!={} → false",
+                expr, dt.format("%H:%M"), field_names[i], val, field));
             return false;
         }
     }
+    sched_debug(&format!("[cron_matches] expr={:?}, dt={} → true", expr, dt.format("%H:%M")));
     true
 }
 
@@ -252,22 +325,34 @@ fn cron_field_matches(field: &str, val: u32, range_start: u32) -> bool {
             if let Ok(step) = step_str.parse::<u32>() {
                 if step == 0 { continue; }
                 if range_part == "*" {
-                    if (val - range_start) % step == 0 { return true; }
+                    if (val - range_start) % step == 0 {
+                        sched_debug(&format!("[cron_field_matches] field={}, val={}, */{}  → true", field, val, step));
+                        return true;
+                    }
                 } else if let Some((start_str, end_str)) = range_part.split_once('-') {
                     if let (Ok(start), Ok(end)) = (start_str.parse::<u32>(), end_str.parse::<u32>()) {
-                        if val >= start && val <= end && (val - start) % step == 0 { return true; }
+                        if val >= start && val <= end && (val - start) % step == 0 {
+                            sched_debug(&format!("[cron_field_matches] field={}, val={}, {}-{}/{} → true", field, val, start, end, step));
+                            return true;
+                        }
                     }
                 }
             }
         } else if let Some((start_str, end_str)) = part.split_once('-') {
             // Range: a-b
             if let (Ok(start), Ok(end)) = (start_str.parse::<u32>(), end_str.parse::<u32>()) {
-                if val >= start && val <= end { return true; }
+                if val >= start && val <= end {
+                    sched_debug(&format!("[cron_field_matches] field={}, val={}, range {}-{} → true", field, val, start, end));
+                    return true;
+                }
             }
         } else {
             // Single number
             if let Ok(n) = part.parse::<u32>() {
-                if val == n { return true; }
+                if val == n {
+                    sched_debug(&format!("[cron_field_matches] field={}, val={}, exact {} → true", field, val, n));
+                    return true;
+                }
             }
         }
     }
@@ -3594,72 +3679,109 @@ fn format_tool_input(name: &str, input: &str) -> String {
 /// Check if a schedule entry should trigger now
 fn should_trigger(entry: &ScheduleEntry) -> bool {
     let now = chrono::Local::now();
+    sched_debug(&format!("[should_trigger] id={}, type={}, schedule={}, now={}, last_run={:?}",
+        entry.id, entry.schedule_type, entry.schedule, now.format("%Y-%m-%d %H:%M:%S"), entry.last_run));
     match entry.schedule_type.as_str() {
         "absolute" => {
             let Ok(schedule_time) = chrono::NaiveDateTime::parse_from_str(&entry.schedule, "%Y-%m-%d %H:%M:%S") else {
+                sched_debug(&format!("[should_trigger] id={}, parse failed → false", entry.id));
                 return false;
             };
             let schedule_dt = schedule_time.and_local_timezone(chrono::Local).single();
-            let Some(schedule_dt) = schedule_dt else { return false };
-            if now < schedule_dt { return false; }
+            let Some(schedule_dt) = schedule_dt else {
+                sched_debug(&format!("[should_trigger] id={}, timezone conversion failed → false", entry.id));
+                return false;
+            };
+            if now < schedule_dt {
+                sched_debug(&format!("[should_trigger] id={}, not yet (now < schedule_dt) → false", entry.id));
+                return false;
+            }
             // Already ran?
             if let Some(ref last) = entry.last_run {
                 if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(last, "%Y-%m-%d %H:%M:%S") {
                     if let Some(last_local) = last_dt.and_local_timezone(chrono::Local).single() {
-                        if last_local >= schedule_dt { return false; }
+                        if last_local >= schedule_dt {
+                            sched_debug(&format!("[should_trigger] id={}, already ran (last={} >= sched={}) → false",
+                                entry.id, last_local.format("%H:%M:%S"), schedule_dt.format("%H:%M:%S")));
+                            return false;
+                        }
                     }
                 }
             }
+            sched_debug(&format!("[should_trigger] id={}, absolute ready → true", entry.id));
             true
         }
         "cron" => {
-            if !cron_matches(&entry.schedule, now) { return false; }
+            if !cron_matches(&entry.schedule, now) {
+                sched_debug(&format!("[should_trigger] id={}, cron not matching → false", entry.id));
+                return false;
+            }
             // Check last_run to avoid duplicate triggers within the same minute
             if let Some(ref last) = entry.last_run {
                 if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(last, "%Y-%m-%d %H:%M:%S") {
                     if let Some(last_local) = last_dt.and_local_timezone(chrono::Local).single() {
                         let now_min = now.format("%Y-%m-%d %H:%M").to_string();
                         let last_min = last_local.format("%Y-%m-%d %H:%M").to_string();
-                        if now_min == last_min { return false; }
+                        if now_min == last_min {
+                            sched_debug(&format!("[should_trigger] id={}, already ran this minute ({}) → false", entry.id, now_min));
+                            return false;
+                        }
                     }
                 }
             }
+            sched_debug(&format!("[should_trigger] id={}, cron matched → true", entry.id));
             true
         }
-        _ => false,
+        _ => {
+            sched_debug(&format!("[should_trigger] id={}, unknown type={} → false", entry.id, entry.schedule_type));
+            false
+        }
     }
 }
 
 /// Update schedule entry after a run: set last_run, delete if once
 fn update_schedule_after_run(entry: &ScheduleEntry, new_context_summary: Option<String>) {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    sched_debug(&format!("[update_schedule_after_run] id={}, type={}, once={}, now={}, has_new_context={}",
+        entry.id, entry.schedule_type, entry.once, now, new_context_summary.is_some()));
 
     // 실행 중 사용자가 삭제한 경우 부활 방지
     let dir = match schedule_dir() {
         Some(d) => d,
-        None => return,
+        None => {
+            sched_debug(&format!("[update_schedule_after_run] id={}, no schedule dir → skip", entry.id));
+            return;
+        }
     };
     let path = dir.join(format!("{}.json", entry.id));
     if !path.exists() {
+        sched_debug(&format!("[update_schedule_after_run] id={}, file already deleted → skip (no resurrection)", entry.id));
         return; // 이미 삭제됨 - write하지 않음
     }
 
     if entry.once || entry.schedule_type == "absolute" {
+        sched_debug(&format!("[update_schedule_after_run] id={}, once/absolute → write last_run then delete", entry.id));
         // Set last_run first to prevent re-trigger if delete fails
         let mut updated = entry.clone();
         updated.last_run = Some(now.clone());
         if let Err(e) = write_schedule_entry(&updated) {
+            sched_debug(&format!("[update_schedule_after_run] id={}, write before delete failed: {}", entry.id, e));
             eprintln!("[Schedule] Failed to write entry {} before delete: {}", entry.id, e);
         }
-        delete_schedule_entry(&entry.id);
+        let deleted = delete_schedule_entry(&entry.id);
+        sched_debug(&format!("[update_schedule_after_run] id={}, delete result={}", entry.id, deleted));
     } else {
+        sched_debug(&format!("[update_schedule_after_run] id={}, cron recurring → update last_run", entry.id));
         let mut updated = entry.clone();
         updated.last_run = Some(now);
         if new_context_summary.is_some() {
             updated.context_summary = new_context_summary;
         }
         if let Err(e) = write_schedule_entry(&updated) {
+            sched_debug(&format!("[update_schedule_after_run] id={}, write failed: {}", entry.id, e));
             eprintln!("[Schedule] Failed to update entry {}: {}", entry.id, e);
+        } else {
+            sched_debug(&format!("[update_schedule_after_run] id={}, updated successfully", entry.id));
         }
     }
 }
@@ -3673,9 +3795,12 @@ async fn execute_schedule(
     token: &str,
     prev_session: Option<ChatSession>,
 ) {
+    sched_debug(&format!("[execute_schedule] START id={}, chat_id={}, prompt={:?}, has_context={}, has_prev_session={}",
+        entry.id, chat_id, truncate_str(&entry.prompt, 60), entry.context_summary.is_some(), prev_session.is_some()));
     // Build prompt with context summary if available
     let user_prompt = entry.prompt.clone();
     let prompt = if let Some(ref summary) = entry.context_summary {
+        sched_debug(&format!("[execute_schedule] id={}, injecting context summary ({} chars)", entry.id, summary.len()));
         format!(
             "[이전 작업 맥락]\n{}\n\n[작업 지시]\n{}",
             summary, user_prompt
@@ -3692,9 +3817,11 @@ async fn execute_schedule(
     let workspace_dir = dirs::home_dir()
         .map(|h| h.join(".cokacdir").join("workspace").join(&schedule_id))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp").join("cokacdir-workspace").join(&schedule_id));
+    sched_debug(&format!("[execute_schedule] id={}, creating workspace: {}", schedule_id, workspace_dir.display()));
     if let Err(e) = fs::create_dir_all(&workspace_dir) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] ⚠ [Schedule] Failed to create workspace: {e}");
+        sched_debug(&format!("[execute_schedule] id={}, workspace creation failed: {}, restoring session", schedule_id, e));
         let mut data = state.lock().await;
         if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
             set.remove(&schedule_id);
@@ -3974,7 +4101,10 @@ async fn execute_schedule(
         }
 
         // Final response
+        sched_debug(&format!("[execute_schedule] id={}, polling done: cancelled={}, had_error={}, response_len={}",
+            schedule_id, cancelled, had_error, full_response.len()));
         if cancelled {
+            sched_debug(&format!("[execute_schedule] id={}, cancelled — killing child process", schedule_id));
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
                     #[cfg(unix)]
@@ -4037,7 +4167,10 @@ async fn execute_schedule(
 
         // For cron entries with context_summary, extract result summary for next run
         // Skip if execution was cancelled or encountered an error
+        sched_debug(&format!("[execute_schedule] id={}, checking context summary: cancelled={}, had_error={}, type={}, once={}, has_context={}",
+            schedule_id, cancelled, had_error, entry_clone.schedule_type, entry_clone.once, entry_clone.context_summary.is_some()));
         let new_context_summary = if !cancelled && !had_error && entry_clone.schedule_type == "cron" && !entry_clone.once && entry_clone.context_summary.is_some() {
+            sched_debug(&format!("[execute_schedule] id={}, extracting result summary", schedule_id));
             if let Some(ref sid) = exec_session_id {
                 let sid = sid.clone();
                 let path = workspace_path_owned.clone();
@@ -4050,10 +4183,17 @@ async fn execute_schedule(
                     )
                 }).await;
                 match summary_result {
-                    Ok(Ok(summary)) => Some(summary),
-                    _ => None,
+                    Ok(Ok(ref summary)) => {
+                        sched_debug(&format!("[execute_schedule] id={}, new context summary: {} chars", schedule_id, summary.len()));
+                        Some(summary.clone())
+                    }
+                    _ => {
+                        sched_debug(&format!("[execute_schedule] id={}, summary extraction failed", schedule_id));
+                        None
+                    }
                 }
             } else {
+                sched_debug(&format!("[execute_schedule] id={}, no session_id for summary", schedule_id));
                 None
             }
         } else {
@@ -4084,11 +4224,14 @@ async fn execute_schedule(
         }
 
         // Update schedule file (last_run / delete if once)
+        sched_debug(&format!("[execute_schedule] id={}, calling update_schedule_after_run", schedule_id));
         update_schedule_after_run(&entry_clone, new_context_summary);
 
         // Workspace directory is preserved for user to continue work via /start
 
         // Clean up + restore previous session
+        sched_debug(&format!("[execute_schedule] id={}, cleaning up: removing cancel_token, pending, restoring session (has_prev={})",
+            schedule_id, prev_session.is_some()));
         {
             let mut data = state_owned.lock().await;
             data.cancel_tokens.remove(&chat_id);
@@ -4102,6 +4245,7 @@ async fn execute_schedule(
                 data.sessions.remove(&chat_id);
             }
         }
+        sched_debug(&format!("[execute_schedule] id={}, END", schedule_id));
 
         // Clean up leftover stop message
         let stop_msg_id = {
@@ -4118,6 +4262,7 @@ async fn execute_schedule(
 /// Scheduler loop: runs every 60 seconds, checks for due schedules
 async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
     let bot_key = token_hash(&token);
+    sched_debug("[scheduler_loop] started");
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -4126,6 +4271,8 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
         let entries = list_schedule_entries(&bot_key, None);
         if entries.is_empty() { continue; }
 
+        sched_debug(&format!("[scheduler_loop] cycle: {} entries found", entries.len()));
+
         for entry in &entries {
             let chat_id = ChatId(entry.chat_id);
 
@@ -4133,6 +4280,7 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
             if !Path::new(&entry.current_path).is_dir() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!("  [{ts}] ⚠ [Scheduler] Path not found: {} (schedule: {})", entry.current_path, entry.id);
+                sched_debug(&format!("[scheduler_loop] id={}, path not found: {} → skip", entry.id, entry.current_path));
                 shared_rate_limit_wait(&state, chat_id).await;
                 let msg = format!("⏰ {}\n\n⚠️ Skipped — path no longer exists\n📂 <code>{}</code>",
                     html_escape(&truncate_str(&entry.prompt, 40)), html_escape(&entry.current_path));
@@ -4153,6 +4301,8 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                 let is_already_pending = data.pending_schedules.get(&chat_id)
                     .map_or(false, |set| set.contains(&entry.id));
 
+                sched_debug(&format!("[scheduler_loop] id={}, is_already_pending={}", entry.id, is_already_pending));
+
                 // If not pending and not due to trigger, skip
                 if !is_already_pending && !should_trigger(entry) {
                     // Check if expired absolute schedule should be discarded
@@ -4160,8 +4310,10 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                         if let Ok(schedule_time) = chrono::NaiveDateTime::parse_from_str(&entry.schedule, "%Y-%m-%d %H:%M:%S") {
                             if let Some(schedule_dt) = schedule_time.and_local_timezone(chrono::Local).single() {
                                 if chrono::Local::now() > schedule_dt {
+                                    sched_debug(&format!("[scheduler_loop] id={}, expired absolute → discard", entry.id));
                                     SchedAction::DiscardExpired
                                 } else {
+                                    sched_debug(&format!("[scheduler_loop] id={}, not yet due → skip", entry.id));
                                     SchedAction::Skip
                                 }
                             } else {
@@ -4176,6 +4328,7 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                 } else {
                     // Entry should execute — check if chat is busy
                     let is_busy = data.cancel_tokens.contains_key(&chat_id);
+                    sched_debug(&format!("[scheduler_loop] id={}, should execute, is_busy={}", entry.id, is_busy));
 
                     if is_busy {
                         // Chat is busy — mark as pending if not already, retry next cycle
@@ -4184,11 +4337,15 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                             data.pending_schedules.entry(chat_id).or_default().insert(entry.id.clone());
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!("  [{ts}] ⏰ [Scheduler] Chat busy, pending: {}", entry.id);
+                            sched_debug(&format!("[scheduler_loop] id={}, chat busy → marked pending", entry.id));
+                        } else {
+                            sched_debug(&format!("[scheduler_loop] id={}, chat busy, already pending → skip", entry.id));
                         }
                         SchedAction::Skip
                     } else {
                         // Not busy — backup session, replace with schedule-specific session, and execute
                         let prev = data.sessions.get(&chat_id).cloned();
+                        sched_debug(&format!("[scheduler_loop] id={}, not busy → execute (has_prev_session={})", entry.id, prev.is_some()));
                         data.sessions.insert(chat_id, ChatSession {
                             session_id: None,
                             current_path: Some(entry.current_path.clone()),
@@ -4211,9 +4368,11 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                     delete_schedule_entry(&entry.id);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ⏰ [Scheduler] Discarded expired once-schedule: {}", entry.id);
+                    sched_debug(&format!("[scheduler_loop] id={}, discarded expired", entry.id));
                     continue;
                 }
                 SchedAction::Execute(prev_session) => {
+                    sched_debug(&format!("[scheduler_loop] id={}, calling execute_schedule", entry.id));
                     execute_schedule(&bot, chat_id, entry, &state, &token, prev_session).await;
                 }
             }
