@@ -1050,7 +1050,7 @@ pub fn theme_path(name: &str) -> Option<PathBuf> {
 
     // Verify the path stays within themes directory after canonicalization
     if let (Ok(canonical_path), Ok(canonical_themes)) =
-        (path.canonicalize(), themes.canonicalize())
+        (path.canonicalize().map(crate::utils::format::strip_unc_prefix), themes.canonicalize().map(crate::utils::format::strip_unc_prefix))
     {
         if canonical_path.starts_with(&canonical_themes) {
             return Some(path);

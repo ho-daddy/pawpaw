@@ -41,6 +41,7 @@ static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
 /// Resolve the path to the claude binary.
 /// First tries `which claude`, then falls back to `bash -lc "which claude"`
 /// (for non-interactive SSH sessions where ~/.profile isn't loaded).
+#[cfg(unix)]
 fn resolve_claude_path() -> Option<String> {
     // Try direct `which claude` first
     if let Ok(output) = Command::new("which").arg("claude").output() {
@@ -61,6 +62,41 @@ fn resolve_claude_path() -> Option<String> {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn resolve_claude_path() -> Option<String> {
+    // Try `where claude` on Windows
+    if let Ok(output) = Command::new("where").arg("claude").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // `where` may return multiple lines; take the first one
+            if let Some(first) = path.lines().next() {
+                if !first.is_empty() {
+                    return Some(first.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: check npm global install paths
+    if let Ok(output) = Command::new("cmd")
+        .args(["/c", "npm root -g"])
+        .output()
+    {
+        if output.status.success() {
+            let npm_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let claude_path = std::path::Path::new(&npm_root)
+                .join("@anthropic-ai")
+                .join("claude-code")
+                .join("cli.js");
+            if claude_path.exists() {
+                return Some(claude_path.display().to_string());
             }
         }
     }
@@ -576,20 +612,12 @@ pub fn extract_result_summary(session_id: &str, working_dir: &str, model: Option
 
 /// Check if Claude CLI is available
 pub fn is_claude_available() -> bool {
-    #[cfg(not(unix))]
-    {
-        false
-    }
-
-    #[cfg(unix)]
-    {
-        get_claude_path().is_some()
-    }
+    get_claude_path().is_some()
 }
 
 /// Check if platform supports AI features
 pub fn is_ai_supported() -> bool {
-    cfg!(unix)
+    true
 }
 
 /// Execute a command using Claude CLI with streaming output
@@ -1191,11 +1219,7 @@ mod tests {
 
     #[test]
     fn test_is_ai_supported() {
-        #[cfg(unix)]
         assert!(is_ai_supported());
-
-        #[cfg(not(unix))]
-        assert!(!is_ai_supported());
     }
 
     // ========== session_id_regex tests ==========

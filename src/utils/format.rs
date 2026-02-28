@@ -1,5 +1,28 @@
 // === UTF-8 safe string slicing utilities ===
+use std::path::PathBuf;
 use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
+
+/// Windows extended-length path prefix (`\\?\`) 제거
+/// `canonicalize()`가 Windows에서 `\\?\C:\Users\...` 형태를 반환하므로 표시/비교 전에 strip
+pub fn strip_unc_prefix(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
+/// Windows 백슬래시 경로를 슬래시로 정규화 (셸 명령/프롬프트에 삽입할 때 사용)
+/// Unix에서는 no-op, Windows에서는 `C:\Users\kst` → `C:/Users/kst`
+pub fn to_shell_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
 
 /// Byte index를 가장 가까운 char boundary로 내림
 pub fn floor_char_boundary(s: &str, index: usize) -> usize {

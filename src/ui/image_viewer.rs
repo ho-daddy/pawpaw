@@ -182,9 +182,9 @@ impl ImageViewerState {
                 });
 
                 // Find current image index
-                if let Ok(canonical_path) = path.canonicalize() {
+                if let Ok(canonical_path) = path.canonicalize().map(crate::utils::format::strip_unc_prefix) {
                     for (i, img_path) in images.iter().enumerate() {
-                        if let Ok(canonical_img) = img_path.canonicalize() {
+                        if let Ok(canonical_img) = img_path.canonicalize().map(crate::utils::format::strip_unc_prefix) {
                             if canonical_img == canonical_path {
                                 current_index = i;
                                 break;

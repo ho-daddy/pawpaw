@@ -6,6 +6,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
+use crate::utils::format::strip_unc_prefix;
+
+/// Check if an error is a cross-device rename error
+#[cfg(unix)]
+fn is_cross_device_error(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EXDEV)
+}
+
+#[cfg(windows)]
+fn is_cross_device_error(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(17) // ERROR_NOT_SAME_DEVICE
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_cross_device_error(_e: &io::Error) -> bool {
+    false
+}
+
 /// File operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOperationType {
@@ -595,7 +613,7 @@ pub fn move_files_with_progress(
             }
             Err(e) => {
                 // If cross-device, we need to copy+delete
-                if e.raw_os_error() == Some(libc::EXDEV) {
+                if is_cross_device_error(&e) {
                     needs_copy.push((src, dest, item_size));
                 } else {
                     failure_count += 1;
@@ -690,9 +708,9 @@ pub fn move_files_with_progress(
 /// Copy a file or directory
 pub fn copy_file(src: &Path, dest: &Path) -> io::Result<()> {
     // Check if source and destination are the same
-    let resolved_src = src.canonicalize()?;
+    let resolved_src = strip_unc_prefix(src.canonicalize()?);
     if dest.exists() {
-        let resolved_dest = dest.canonicalize()?;
+        let resolved_dest = strip_unc_prefix(dest.canonicalize()?);
         if resolved_src == resolved_dest {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -759,7 +777,7 @@ fn copy_dir_recursive_inner(
     }
 
     // Get canonical path to detect symlink loops
-    let canonical_src = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
+    let canonical_src = src.canonicalize().map(strip_unc_prefix).unwrap_or_else(|_| src.to_path_buf());
 
     // Check for circular symlink
     if visited.contains(&canonical_src) {
@@ -806,9 +824,9 @@ fn copy_dir_recursive_inner(
 /// Move a file or directory
 pub fn move_file(src: &Path, dest: &Path) -> io::Result<()> {
     // Check if source and destination are the same
-    let resolved_src = src.canonicalize()?;
+    let resolved_src = strip_unc_prefix(src.canonicalize()?);
     if dest.exists() {
-        let resolved_dest = dest.canonicalize()?;
+        let resolved_dest = strip_unc_prefix(dest.canonicalize()?);
         if resolved_src == resolved_dest {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -830,7 +848,7 @@ pub fn move_file(src: &Path, dest: &Path) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(e) => {
             // If rename fails (cross-device), copy then delete
-            if e.raw_os_error() == Some(libc::EXDEV) {
+            if is_cross_device_error(&e) {
                 copy_file(src, dest)?;
                 delete_file(src)?;
                 Ok(())
@@ -928,9 +946,15 @@ pub fn is_valid_filename(name: &str) -> Result<(), &'static str> {
 }
 
 /// Sensitive paths that symlinks should not point to
+#[cfg(unix)]
 const SENSITIVE_PATHS: &[&str] = &[
     "/etc", "/sys", "/proc", "/boot", "/root", "/var/log",
-    "/home", "/dev", "/tmp", "/run", "/var/run",
+    "/home", "/dev", "/run", "/var/run",
+];
+
+#[cfg(windows)]
+const SENSITIVE_PATHS: &[&str] = &[
+    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
 ];
 
 /// Check symlinks in files to be archived for security
@@ -952,7 +976,7 @@ fn check_symlink_recursive(
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> io::Result<()> {
     // Detect symlink loops using visited set
-    if let Ok(canonical_path) = path.canonicalize() {
+    if let Ok(canonical_path) = path.canonicalize().map(strip_unc_prefix) {
         if !visited.insert(canonical_path.clone()) {
             // Already visited - symlink loop detected, skip to avoid infinite recursion
             return Ok(());
@@ -979,8 +1003,8 @@ fn check_symlink_recursive(
         // Absolute symlinks pointing outside base_dir are always rejected
         if link_target.is_absolute() {
             // Check if it points inside base_dir
-            if let Ok(base_canonical) = base_dir.canonicalize() {
-                if let Ok(target_canonical) = link_target.canonicalize() {
+            if let Ok(base_canonical) = base_dir.canonicalize().map(strip_unc_prefix) {
+                if let Ok(target_canonical) = link_target.canonicalize().map(strip_unc_prefix) {
                     if !target_canonical.starts_with(&base_canonical) {
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
@@ -1015,12 +1039,12 @@ fn check_symlink_recursive(
         };
 
         // Get canonical path to resolve all symlinks and ".." components
-        match resolved_target.canonicalize() {
+        match resolved_target.canonicalize().map(strip_unc_prefix) {
             Ok(canonical) => {
                 let target_str = canonical.to_string_lossy();
 
                 // Check if symlink points outside base_dir
-                if let Ok(base_canonical) = base_dir.canonicalize() {
+                if let Ok(base_canonical) = base_dir.canonicalize().map(strip_unc_prefix) {
                     if !canonical.starts_with(&base_canonical) {
                         // Check against sensitive paths for better error message
                         for sensitive in SENSITIVE_PATHS {
@@ -1096,7 +1120,7 @@ fn collect_unsafe_symlinks(
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) {
     // Detect symlink loops
-    if let Ok(canonical_path) = path.canonicalize() {
+    if let Ok(canonical_path) = path.canonicalize().map(strip_unc_prefix) {
         if !visited.insert(canonical_path.clone()) {
             return; // Already visited, skip
         }
@@ -1122,9 +1146,9 @@ fn collect_unsafe_symlinks(
                     parent.join(&link_target)
                 };
 
-                match resolved_target.canonicalize() {
+                match resolved_target.canonicalize().map(strip_unc_prefix) {
                     Ok(canonical) => {
-                        if let Ok(base_canonical) = base_dir.canonicalize() {
+                        if let Ok(base_canonical) = base_dir.canonicalize().map(strip_unc_prefix) {
                             !canonical.starts_with(&base_canonical)
                         } else {
                             true // Can't resolve base, unsafe

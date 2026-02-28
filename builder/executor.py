@@ -3,7 +3,9 @@ Build executor for Rust projects with cross-compilation support.
 """
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -79,7 +81,9 @@ class BuildExecutor:
         self.logger.info(f"Building for {target.friendly_name}...")
 
         # Determine build command
-        if target.needs_zigbuild:
+        if target.needs_xwin:
+            cmd = ["cargo", "xwin", "build"]
+        elif target.needs_zigbuild:
             cmd = ["cargo", "zigbuild"]
         else:
             cmd = ["cargo", "build"]
@@ -94,6 +98,16 @@ class BuildExecutor:
 
         # Get environment
         env = self.tool_installer.get_env()
+
+        # For Windows ARM64 cross-compilation, cargo-xwin passes /imsvc flags
+        # (clang-cl syntax) via CFLAGS, but the ring crate uses plain clang
+        # which doesn't understand /imsvc. A clang wrapper converts /imsvc to
+        # -isystem so plain clang can process the MSVC include paths.
+        clang_wrapper_dir = None
+        if target.needs_xwin and "aarch64" in target.rust_target:
+            clang_wrapper_dir = self._create_clang_wrapper()
+            if clang_wrapper_dir:
+                env["PATH"] = clang_wrapper_dir + os.pathsep + env.get("PATH", "")
 
         self.logger.debug(f"Running: {' '.join(cmd)}")
 
@@ -138,12 +152,45 @@ class BuildExecutor:
                 error_message=str(e),
             )
 
+    def _create_clang_wrapper(self) -> Optional[str]:
+        """Create a clang wrapper that converts /imsvc to -isystem for plain clang."""
+        try:
+            wrapper_dir = os.path.join(tempfile.gettempdir(), "clang-xwin-wrapper")
+            os.makedirs(wrapper_dir, exist_ok=True)
+            wrapper_path = os.path.join(wrapper_dir, "clang")
+
+            clang_path = shutil.which("clang")
+            if not clang_path:
+                return None
+
+            wrapper_script = f"""#!/bin/bash
+args=()
+skip_next=false
+for arg in "$@"; do
+    if $skip_next; then
+        args+=("-isystem" "$arg")
+        skip_next=false
+    elif [ "$arg" = "/imsvc" ]; then
+        skip_next=true
+    else
+        args+=("$arg")
+    fi
+done
+exec {clang_path} "${{args[@]}}"
+"""
+            with open(wrapper_path, "w") as f:
+                f.write(wrapper_script)
+            os.chmod(wrapper_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+            return wrapper_dir
+        except Exception:
+            return None
+
     def _find_binary(self, target: Target) -> Optional[Path]:
         """Find the built binary."""
         profile = "release" if self.config.release else "debug"
 
-        # Determine binary name (could be different on Windows)
-        binary_name = "cokacdir"
+        # Determine binary name (Windows targets produce .exe)
+        binary_name = "cokacdir.exe" if target.platform == "windows" else "cokacdir"
 
         if target.is_native:
             binary_path = self.target_dir / profile / binary_name
@@ -164,8 +211,11 @@ class BuildExecutor:
             if not result.success or not result.binary_path:
                 continue
 
-            # Determine destination name
-            dest_name = f"cokacdir-{result.target.friendly_name}"
+            # Determine destination name (Windows binaries keep .exe extension)
+            if result.target.platform == "windows":
+                dest_name = f"cokacdir-{result.target.friendly_name}.exe"
+            else:
+                dest_name = f"cokacdir-{result.target.friendly_name}"
             dest_path = self.dist_dir / dest_name
 
             try:
@@ -214,6 +264,43 @@ class BuildExecutor:
                     "cargo-zigbuild is required for macOS cross-compilation. Run with --setup first."
                 )
                 return []
+
+        # Check if we need Windows cross-compilation tools
+        needs_xwin = any(t.needs_xwin for t in targets)
+        if needs_xwin:
+            if not self.tool_installer.is_cargo_xwin_installed():
+                self.logger.error(
+                    "cargo-xwin is required for Windows cross-compilation. Run with --setup-windows first."
+                )
+                return []
+
+            if not self.tool_installer.is_clang_installed():
+                self.logger.error(
+                    "clang is required for Windows cross-compilation. Install with: apt install clang"
+                )
+                return []
+
+            if not self.tool_installer.is_lld_installed():
+                self.logger.error(
+                    "lld is required for Windows cross-compilation. Install with: apt install lld"
+                )
+                return []
+
+            if not self.tool_installer.is_llvm_lib_installed():
+                self.logger.error(
+                    "llvm-lib is required for Windows cross-compilation. Install with: apt install llvm"
+                )
+                return []
+
+            if not self.tool_installer.is_clang_cl_installed():
+                self.logger.error(
+                    "clang-cl is required for Windows ARM64 cross-compilation. Install with: apt install clang-tools-18"
+                )
+                return []
+
+            self.logger.info(
+                "Note: cargo-xwin will download MSVC CRT/SDK on first build (requires internet)"
+            )
 
         # Build each target
         total = len(targets)
@@ -266,12 +353,21 @@ def run_build(
         logger.target(target.friendly_name, target.rust_target)
     logger.newline()
 
-    # Check if cross-compilation setup is needed
-    needs_setup = any(t.needs_zigbuild for t in resolved_targets)
-    if needs_setup:
+    # Check if cross-compilation setup is needed (zigbuild for macOS/Linux)
+    needs_zigbuild_setup = any(t.needs_zigbuild for t in resolved_targets)
+    if needs_zigbuild_setup:
         if not tool_installer.is_zig_installed() or not tool_installer.is_macos_sdk_installed():
             logger.header("Cross-compilation Setup Required")
-            if not tool_installer.setup_all():
+            if not tool_installer.setup_cross_compile():
+                return False
+            logger.newline()
+
+    # Check if Windows cross-compilation setup is needed
+    needs_xwin_setup = any(t.needs_xwin for t in resolved_targets)
+    if needs_xwin_setup:
+        if not tool_installer.is_cargo_xwin_installed() or not tool_installer.is_clang_installed():
+            logger.header("Windows Cross-compilation Setup Required")
+            if not tool_installer.setup_windows_cross():
                 return False
             logger.newline()
 

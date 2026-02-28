@@ -648,5 +648,17 @@ fn unpack_file_group(
         }
     }
 
+    #[cfg(not(unix))]
+    if modified > 0 {
+        use std::time::{Duration, SystemTime};
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(modified as u64);
+        if let Ok(file) = fs::OpenOptions::new().write(true).open(&out_path) {
+            let times = std::fs::FileTimes::new()
+                .set_accessed(mtime)
+                .set_modified(mtime);
+            let _ = file.set_times(times);
+        }
+    }
+
     Ok(safe_name.to_string())
 }

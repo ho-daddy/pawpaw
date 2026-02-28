@@ -302,6 +302,10 @@ pub enum PanelAction {
     OpenInFinder,
     #[cfg(target_os = "macos")]
     OpenInVSCode,
+    #[cfg(target_os = "windows")]
+    OpenInExplorer,
+    #[cfg(target_os = "windows")]
+    OpenInVSCode,
 }
 
 /// Default keybindings for FilePanel (matches the original hardcoded keys).
@@ -343,7 +347,10 @@ pub fn default_panel_keybindings() -> HashMap<PanelAction, Vec<String>> {
     // Clipboard
     m.insert(PanelAction::Copy, vec!["//Copy selected files".into(), "ctrl+c".into()]);
     m.insert(PanelAction::Cut, vec!["//Cut selected files".into(), "ctrl+x".into()]);
+    #[cfg(not(windows))]
     m.insert(PanelAction::Paste, vec!["//Paste files".into(), "ctrl+v".into(), "shift+v".into()]);
+    #[cfg(windows)]
+    m.insert(PanelAction::Paste, vec!["//Paste files".into(), "shift+v".into()]);
 
     // Sort
     m.insert(PanelAction::SortByName, vec!["//Sort by name".into(), "n".into()]);
@@ -381,6 +388,13 @@ pub fn default_panel_keybindings() -> HashMap<PanelAction, Vec<String>> {
     #[cfg(target_os = "macos")]
     {
         m.insert(PanelAction::OpenInFinder, vec!["//Open in Finder".into(), "o".into()]);
+        m.insert(PanelAction::OpenInVSCode, vec!["//Open in VS Code".into(), "c".into()]);
+    }
+
+    // Windows only
+    #[cfg(target_os = "windows")]
+    {
+        m.insert(PanelAction::OpenInExplorer, vec!["//Open in Explorer".into(), "o".into()]);
         m.insert(PanelAction::OpenInVSCode, vec!["//Open in VS Code".into(), "c".into()]);
     }
 
@@ -1164,8 +1178,9 @@ mod tests {
         // Quit has one key "q" → displayed as "Q"
         assert_eq!(kb.panel_first_key(PanelAction::Quit), "Q");
 
-        // Paste has "ctrl+v" and "shift+v"
+        // Paste has "ctrl+v" and "shift+v" on Unix, "shift+v" only on Windows
         let paste_keys = kb.panel_keys(PanelAction::Paste);
+        #[cfg(not(windows))]
         assert!(paste_keys.contains(&"Ctrl+V".to_string()));
         assert!(paste_keys.contains(&"Shift+V".to_string()));
 

@@ -20,12 +20,39 @@ use super::{
     theme::Theme,
 };
 
+/// 입력 문자열이 경로인지 판별 ('/', '~', 또는 Windows 드라이브 문자 'C:\' 등)
+fn is_path_input(input: &str) -> bool {
+    if input.starts_with('/') || input.starts_with('~') {
+        return true;
+    }
+    // Windows absolute path: e.g. "C:\", "D:/"
+    let bytes = input.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    false
+}
+
+/// 문자열이 경로 구분자('/' 또는 '\')로 끝나는지 확인
+fn ends_with_separator(s: &str) -> bool {
+    s.ends_with('/') || s.ends_with('\\')
+}
+
+/// char 슬라이스에서 마지막 경로 구분자('/' 또는 '\') 위치 찾기
+fn find_separator_rposition(chars: &[char]) -> Option<usize> {
+    chars.iter().rposition(|&c| c == '/' || c == '\\')
+}
+
 /// 경로 문자열을 확장 (~ 홈 경로 확장)
 fn expand_path_string(input: &str) -> PathBuf {
     if input.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
             let rest = input.strip_prefix('~').unwrap_or("");
-            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            let rest = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')).unwrap_or(rest);
             if rest.is_empty() {
                 home
             } else {
@@ -46,7 +73,7 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
     let expanded = if input.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
             let rest = input.strip_prefix('~').unwrap_or("");
-            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            let rest = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')).unwrap_or(rest);
             if rest.is_empty() {
                 home.display().to_string()
             } else {
@@ -61,17 +88,17 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
 
     let path = PathBuf::from(&expanded);
 
-    // 입력이 /로 끝나면 해당 디렉토리 내부 검색
-    if expanded.ends_with('/') || expanded.ends_with(std::path::MAIN_SEPARATOR) {
+    // 입력이 구분자로 끝나면 해당 디렉토리 내부 검색
+    if ends_with_separator(&expanded) {
         return (path, String::new());
     }
 
     // Special handling: "/." 로 끝나면 (but not "/..") "."를 prefix로 처리
     // PathBuf::file_name()은 "."를 None으로 반환하므로 수동 처리 필요
-    if expanded.ends_with("/.") && !expanded.ends_with("/..") {
-        let parent_str = &expanded[..expanded.len() - 2]; // "/." 제거
+    if (expanded.ends_with("/.") || expanded.ends_with("\\.")) && !expanded.ends_with("/..") && !expanded.ends_with("\\..") {
+        let parent_str = &expanded[..expanded.len() - 2]; // "/." or "\\." 제거
         let parent_path = if parent_str.is_empty() {
-            PathBuf::from("/")
+            if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") }
         } else {
             PathBuf::from(parent_str)
         };
@@ -91,7 +118,8 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
         (parent.to_path_buf(), prefix)
     } else {
         // 루트 경로인 경우
-        (PathBuf::from("/"), String::new())
+        let root = if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") };
+        (root, String::new())
     }
 }
 
@@ -133,7 +161,7 @@ fn get_path_suggestions(base_dir: &PathBuf, prefix: &str) -> Vec<String> {
             // 순차 매칭 (대소문자 무시)
             if prefix.is_empty() || matches_subsequence(&name.to_lowercase(), &lower_prefix) {
                 let display_name = if is_dir {
-                    format!("{}/", name)
+                    format!("{}{}", name, std::path::MAIN_SEPARATOR)
                 } else {
                     name
                 };
@@ -221,19 +249,19 @@ fn find_common_prefix(suggestions: &[String]) -> String {
         common_chars = common_chars.min(len);
     }
 
-    // 디렉토리 접미사 `/` 제외
+    // 디렉토리 접미사 `/` 또는 `\` 제외
     let common: String = first.chars().take(common_chars).collect();
-    common.trim_end_matches('/').to_string()
+    common.trim_end_matches(['/', '\\']).to_string()
 }
 
 /// 선택된 자동완성 항목 적용
 fn apply_completion(dialog: &mut Dialog, base_dir: &Path, suggestion: &str) {
-    let new_path = base_dir.join(suggestion.trim_end_matches('/'));
+    let new_path = base_dir.join(suggestion.trim_end_matches(['/', '\\']));
     let mut path_str = new_path.display().to_string();
 
-    // 디렉토리인 경우 `/` 추가
-    if suggestion.ends_with('/') && !path_str.ends_with('/') {
-        path_str.push('/');
+    // 디렉토리인 경우 구분자 추가
+    if ends_with_separator(suggestion) && !ends_with_separator(&path_str) {
+        path_str.push(std::path::MAIN_SEPARATOR);
     }
 
     dialog.input = path_str;
@@ -285,8 +313,8 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
             let w = area.width.saturating_sub(DIALOG_MARGIN).max(DIALOG_MIN_WIDTH);
             let max_h = GOTO_BASE_HEIGHT + MAX_COMPLETION_HEIGHT;
 
-            // 북마크 모드인지 확인 (입력이 /나 ~로 시작하지 않으면 북마크 모드)
-            let is_bookmark_mode = !dialog.input.starts_with('/') && !dialog.input.starts_with('~');
+            // 북마크 모드인지 확인 (입력이 경로가 아니면 북마크 모드)
+            let is_bookmark_mode = !is_path_input(&dialog.input);
 
             let has_bookmark_entries = !app.settings.bookmarked_path.is_empty()
                 || !app.settings.remote_profiles.is_empty();
@@ -1190,11 +1218,11 @@ fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t
 
     // 입력에서 완성할 이름(prefix)의 시작 위치 계산 (char 인덱스)
     let input_chars: Vec<char> = dialog.input.chars().collect();
-    let prefix_char_start = if dialog.input.ends_with('/') {
+    let prefix_char_start = if ends_with_separator(&dialog.input) {
         input_chars.len()
     } else {
-        // 마지막 '/' 위치 찾기
-        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+        // 마지막 경로 구분자 위치 찾기
+        find_separator_rposition(&input_chars).map(|i| i + 1).unwrap_or(0)
     };
 
     // 현재 입력된 prefix 추출
@@ -1202,19 +1230,19 @@ fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t
 
     // base_dir 계산하여 루트 경로 여부 확인
     let (base_dir, _) = parse_path_for_completion(&dialog.input);
-    let is_root_path = base_dir == Path::new("/");
+    let is_root_path = base_dir.components().count() <= 1;
 
     // 선택된 항목에서 미리보기 부분 계산 (입력된 prefix 이후 부분)
     let preview_suffix = if let Some(ref completion) = dialog.completion {
         if completion.visible && !completion.suggestions.is_empty() {
             if let Some(selected) = completion.suggestions.get(completion.selected_index) {
-                let selected_name = selected.trim_end_matches('/');
+                let selected_name = selected.trim_end_matches(['/', '\\']);
                 // 대소문자 무시하여 prefix 매칭 후 나머지 부분 추출
                 if selected_name.to_lowercase().starts_with(&current_prefix.to_lowercase()) {
                     let prefix_char_count = current_prefix.chars().count();
                     let suffix: String = selected_name.chars().skip(prefix_char_count).collect();
-                    if selected.ends_with('/') {
-                        format!("{}/", suffix)
+                    if ends_with_separator(selected) {
+                        format!("{}{}", suffix, std::path::MAIN_SEPARATOR)
                     } else {
                         suffix.to_string()
                     }
@@ -1327,7 +1355,7 @@ fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t
     frame.render_widget(Paragraph::new(input_line), input_area);
 
     // 경로 입력 모드 vs 북마크 검색 모드 분기
-    let is_path_mode = dialog.input.starts_with('/') || dialog.input.starts_with('~');
+    let is_path_mode = is_path_input(&dialog.input);
 
     // Help (맨 아래에 표시)
     let help_key_style = Style::default().fg(theme.dialog.help_key_text).add_modifier(Modifier::BOLD);
@@ -1971,7 +1999,7 @@ fn draw_completion_list(
     for (i, suggestion) in visible_items.iter().enumerate() {
         let actual_index = scroll_offset + i;
         let is_selected = actual_index == completion.selected_index;
-        let is_dir = suggestion.ends_with('/');
+        let is_dir = ends_with_separator(suggestion);
 
         let style = if is_selected {
             selected_style
@@ -1981,9 +2009,9 @@ fn draw_completion_list(
             file_style
         };
 
-        // 루트 경로일 때 "/" 추가
+        // 루트 경로일 때 구분자 추가
         let display_name = if is_root {
-            format!("/{}", suggestion)
+            format!("{}{}", std::path::MAIN_SEPARATOR, suggestion)
         } else {
             suggestion.to_string()
         };
@@ -2471,7 +2499,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                     // 새 문자 처리
                     if c == '~' {
                         if let Some(home) = dirs::home_dir() {
-                            dialog.input = format!("{}/", home.display());
+                            dialog.input = format!("{}{}", home.display(), std::path::MAIN_SEPARATOR);
                             dialog.cursor_pos = dialog.input.chars().count();
                             update_path_suggestions(dialog);
                         }
@@ -2529,7 +2557,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
         }
 
         // 경로 모드 vs 북마크 모드 결정 (selection 처리 후 재계산)
-        let is_path_mode = dialog.input.starts_with('/') || dialog.input.starts_with('~');
+        let is_path_mode = is_path_input(&dialog.input);
 
         if is_path_mode {
             // === 경로 입력 모드: 기존 Go to Path 동작 그대로 ===
@@ -2683,12 +2711,12 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                     }
                 }
                 KeyCode::Left => {
-                    // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
+                    // 완성 이름 시작 위치 계산 (마지막 구분자 다음 위치)
                     let input_chars: Vec<char> = dialog.input.chars().collect();
-                    let prefix_start = if dialog.input.ends_with('/') {
+                    let prefix_start = if ends_with_separator(&dialog.input) {
                         input_chars.len()
                     } else {
-                        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                        find_separator_rposition(&input_chars).map(|i| i + 1).unwrap_or(0)
                     };
                     if dialog.cursor_pos > prefix_start {
                         dialog.cursor_pos -= 1;
@@ -2702,10 +2730,10 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                 KeyCode::Home => {
                     // 완성 이름 시작 위치로 이동
                     let input_chars: Vec<char> = dialog.input.chars().collect();
-                    let prefix_start = if dialog.input.ends_with('/') {
+                    let prefix_start = if ends_with_separator(&dialog.input) {
                         input_chars.len()
                     } else {
-                        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                        find_separator_rposition(&input_chars).map(|i| i + 1).unwrap_or(0)
                     };
                     dialog.cursor_pos = prefix_start;
                 }
@@ -2716,7 +2744,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                     if c == '~' {
                         // '~' 입력 시 홈 폴더 경로로 설정
                         if let Some(home) = dirs::home_dir() {
-                            dialog.input = format!("{}/", home.display());
+                            dialog.input = format!("{}{}", home.display(), std::path::MAIN_SEPARATOR);
                             dialog.cursor_pos = dialog.input.chars().count();
                             update_path_suggestions(dialog);
                         }
@@ -3069,7 +3097,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                     if dialog.input.is_empty() && (c == '/' || c == '~') {
                         if c == '~' {
                             if let Some(home) = dirs::home_dir() {
-                                dialog.input = format!("{}/", home.display());
+                                dialog.input = format!("{}{}", home.display(), std::path::MAIN_SEPARATOR);
                                 dialog.cursor_pos = dialog.input.chars().count();
                                 update_path_suggestions(dialog);
                             }
@@ -4331,6 +4359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_expand_absolute_path() {
         let result = expand_path_string("/usr/bin");
         assert_eq!(result, PathBuf::from("/usr/bin"));
@@ -4345,6 +4374,7 @@ mod tests {
     // ========== parse_path_for_completion tests ==========
 
     #[test]
+    #[cfg(unix)]
     fn test_parse_path_trailing_slash() {
         let (base_dir, prefix) = parse_path_for_completion("/usr/");
         assert_eq!(base_dir, PathBuf::from("/usr/"));
@@ -4352,6 +4382,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parse_path_partial_name() {
         let (base_dir, prefix) = parse_path_for_completion("/usr/bi");
         assert_eq!(base_dir, PathBuf::from("/usr"));
@@ -4359,6 +4390,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parse_path_root() {
         let (base_dir, prefix) = parse_path_for_completion("/");
         assert_eq!(base_dir, PathBuf::from("/"));
@@ -4439,8 +4471,8 @@ mod tests {
         let suggestions = get_path_suggestions(&temp_dir, "a");
 
         // Directory should come first
-        assert!(suggestions[0].ends_with('/'));
-        assert_eq!(suggestions[0], "adir/");
+        assert!(ends_with_separator(&suggestions[0]));
+        assert_eq!(suggestions[0], format!("adir{}", std::path::MAIN_SEPARATOR));
 
         cleanup_temp_test_dir(&temp_dir);
     }

@@ -7,8 +7,9 @@ mod enc;
 
 use std::io;
 use std::env;
+use std::sync::OnceLock;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -24,6 +25,30 @@ use crate::utils::markdown::{render_markdown, MarkdownTheme, is_line_empty};
 use crate::keybindings::PanelAction;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Global binary path, resolved once at startup via `std::env::current_exe()`.
+/// Works on Linux (/proc/self/exe), macOS (_NSGetExecutablePath), Windows (GetModuleFileNameW).
+static BIN_PATH: OnceLock<String> = OnceLock::new();
+
+/// Initialize the global binary path. Call once at startup.
+fn init_bin_path() {
+    BIN_PATH.get_or_init(|| {
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "cokacdir.exe".to_string()
+                } else {
+                    "cokacdir".to_string()
+                }
+            })
+    });
+}
+
+/// Get the resolved binary path.
+pub fn bin_path() -> &'static str {
+    BIN_PATH.get().map(|s| s.as_str()).unwrap_or("cokacdir")
+}
 
 fn print_help() {
     println!("cokacdir {} - Multi-panel terminal file manager", VERSION);
@@ -81,7 +106,7 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
         std::process::exit(1);
     }
 
-    let abs_path = match file_path.canonicalize() {
+    let abs_path = match file_path.canonicalize().map(crate::utils::format::strip_unc_prefix) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => {
             eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to resolve path: {}", e)}));
@@ -243,8 +268,7 @@ fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &s
     // Step 2: Spawn a detached child process to extract context summary and update the schedule
     if let Some(sid) = session_id {
         cron_debug(&format!("  Spawning background process for context summary extraction: session={}", sid));
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cokacdir"));
-        let child = std::process::Command::new(exe)
+        let child = std::process::Command::new(bin_path())
             .arg("--cron-context")
             .arg(&id)
             .arg(sid)
@@ -568,8 +592,17 @@ fn normalize_consecutive_empty_lines(text: &str) -> String {
 }
 
 fn main() -> io::Result<()> {
+    // Resolve binary path at startup (works on Linux, macOS, Windows)
+    init_bin_path();
+
     // Initialize debug flag from environment variable
     claude::init_debug_from_env();
+
+    // Ensure home directory is available (~/.cokacdir is required)
+    if dirs::home_dir().is_none() {
+        eprintln!("Error: Cannot determine home directory. ~/.cokacdir is required.");
+        std::process::exit(1);
+    }
 
     // Handle command line arguments
     let args: Vec<String> = env::args().collect();
@@ -820,7 +853,7 @@ fn main() -> io::Result<()> {
                 let resolved = if p.is_absolute() {
                     p
                 } else {
-                    env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")).join(p)
+                    env::current_dir().unwrap_or_else(|_| if cfg!(windows) { std::path::PathBuf::from("C:\\") } else { std::path::PathBuf::from("/") }).join(p)
                 };
                 start_paths.push(resolved);
             }
@@ -854,14 +887,18 @@ fn main() -> io::Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
     // Detect terminal image protocol (must be after alternate screen, before event loop)
     let picker = {
+        #[cfg(unix)]
         let mut p = ratatui_image::picker::Picker::from_termios()
             .unwrap_or_else(|_| ratatui_image::picker::Picker::new((8, 16)));
+        #[cfg(not(unix))]
+        let mut p = ratatui_image::picker::Picker::new((8, 16));
         p.guess_protocol();
         p
     };
@@ -1263,6 +1300,7 @@ fn run_app<B: ratatui::backend::Backend>(
             if app.remote_spinner.is_some() {
                 let ev = event::read()?;
                 if let Event::Key(key) = ev {
+                    if key.kind != KeyEventKind::Press { continue; }
                     if key.code == KeyCode::Esc {
                         app.remote_spinner = None;
                         app.show_message("Connection cancelled");
@@ -1270,8 +1308,48 @@ fn run_app<B: ratatui::backend::Backend>(
                 }
                 continue;
             }
-            match event::read()? {
-                Event::Key(key) => {
+            let ev = event::read()?;
+
+            // Windows: crossterm의 bracketed paste 미지원 워크어라운드 (crossterm#737)
+            // Windows Terminal이 Ctrl+V 시 클립보드 텍스트를 개별 키 이벤트로 전송함.
+            // 연속으로 즉시 도착하는 문자 키 이벤트를 paste burst로 감지하여 처리.
+            #[cfg(windows)]
+            {
+                if let Event::Key(ref key) = ev {
+                    if key.kind == KeyEventKind::Press {
+                        if let KeyCode::Char(first_c) = key.code {
+                            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                                // 즉시 도착하는 후속 이벤트가 있는지 확인 (paste burst)
+                                let mut paste_buf = String::new();
+                                paste_buf.push(first_c);
+                                while event::poll(Duration::ZERO)? {
+                                    match event::read()? {
+                                        Event::Key(nk) if nk.kind == KeyEventKind::Press => {
+                                            match nk.code {
+                                                KeyCode::Char(nc) if !nk.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                                                    paste_buf.push(nc);
+                                                }
+                                                KeyCode::Enter => paste_buf.push('\n'),
+                                                _ => break,
+                                            }
+                                        }
+                                        _ => continue, // Release 이벤트 등 무시
+                                    }
+                                }
+                                if paste_buf.len() > 1 {
+                                    // 멀티 문자 paste burst 감지 → paste로 처리
+                                    handle_windows_paste(app, &paste_buf);
+                                    continue;
+                                }
+                                // 단일 문자 → 정상 키 처리로 fall through
+                            }
+                        }
+                    }
+                }
+            }
+
+            match ev {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match app.current_screen {
                         Screen::FilePanel => {
                             if handle_panel_input(app, key.code, key.modifiers) {
@@ -1399,6 +1477,43 @@ fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
+/// Windows: paste burst로 감지된 텍스트를 현재 화면 컨텍스트에 맞게 처리
+#[cfg(windows)]
+fn handle_windows_paste(app: &mut App, text: &str) {
+    match app.current_screen {
+        Screen::FilePanel => {
+            if app.is_ai_mode() && app.ai_panel_index == Some(app.active_panel_index) {
+                if let Some(ref mut state) = app.ai_state {
+                    ui::ai_screen::handle_paste(state, text);
+                }
+            } else if app.dialog.is_some() {
+                ui::dialogs::handle_paste(app, text);
+            } else if app.advanced_search_state.active {
+                ui::advanced_search::handle_paste(&mut app.advanced_search_state, text);
+            }
+        }
+        Screen::FileEditor => {
+            ui::file_editor::handle_paste(app, text);
+        }
+        Screen::AIScreen => {
+            if let Some(ref mut state) = app.ai_state {
+                ui::ai_screen::handle_paste(state, text);
+            }
+        }
+        Screen::GitScreen => {
+            if let Some(ref mut state) = app.git_screen_state {
+                ui::git_screen::handle_paste(state, text);
+            }
+        }
+        Screen::ImageViewer => {
+            if app.dialog.is_some() {
+                ui::dialogs::handle_paste(app, text);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     // AI 모드일 때: active_panel이 AI 패널 쪽이면 AI로 입력 전달, 아니면 파일 패널 조작
     if app.is_ai_mode() {
@@ -1500,6 +1615,10 @@ fn handle_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
             PanelAction::OpenInFinder => app.open_in_finder(),
             #[cfg(target_os = "macos")]
             PanelAction::OpenInVSCode => app.open_in_vscode(),
+            #[cfg(target_os = "windows")]
+            PanelAction::OpenInExplorer => app.open_in_explorer(),
+            #[cfg(target_os = "windows")]
+            PanelAction::OpenInVSCode => app.open_in_vscode_win(),
         }
     }
     false

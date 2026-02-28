@@ -345,6 +345,11 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         items.push((PanelAction::OpenInFinder, "finder "));
         items.push((PanelAction::OpenInVSCode, "vscode "));
     }
+    #[cfg(target_os = "windows")]
+    {
+        items.push((PanelAction::OpenInExplorer, "explorer "));
+        items.push((PanelAction::OpenInVSCode, "vscode "));
+    }
 
     items.push((PanelAction::Settings, "set "));
     items.push((PanelAction::Quit, "quit"));

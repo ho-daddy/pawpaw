@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime};
 use chrono::{DateTime, Local};
 
 use crate::config::Settings;
+use crate::utils::format::strip_unc_prefix;
 use crate::keybindings::Keybindings;
 use crate::services::file_ops::{self, FileOperationType, ProgressMessage, FileOperationResult};
 use crate::services::remote::{self, RemoteContext, RemoteProfile, ConnectionStatus, SftpFileEntry};
@@ -20,8 +21,10 @@ use crate::ui::theme::DEFAULT_THEME_NAME;
 
 /// Encode a command as base64 for safe shell execution
 /// This avoids all shell escaping issues by encoding the entire command
+#[cfg(unix)]
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
+#[cfg(unix)]
 fn encode_command_base64(command: &str) -> String {
     BASE64.encode(command.as_bytes())
 }
@@ -134,7 +137,7 @@ pub fn get_valid_path(target_path: &Path, fallback: &Path) -> PathBuf {
     }
 
     // Ultimate fallback to root
-    PathBuf::from("/")
+    if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,7 +896,7 @@ pub struct PanelState {
 impl PanelState {
     pub fn new(path: PathBuf) -> Self {
         // Validate path and get a valid one
-        let fallback = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let fallback = dirs::home_dir().unwrap_or_else(|| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
         let valid_path = get_valid_path(&path, &fallback);
 
         let mut state = Self {
@@ -917,7 +920,7 @@ impl PanelState {
     /// Create a PanelState with settings from config
     pub fn with_settings(path: PathBuf, panel_settings: &crate::config::PanelSettings) -> Self {
         // Validate path and get a valid one
-        let fallback = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let fallback = dirs::home_dir().unwrap_or_else(|| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
         let valid_path = get_valid_path(&path, &fallback);
 
         let sort_by = parse_sort_by(&panel_settings.sort_by);
@@ -1233,6 +1236,29 @@ impl PanelState {
                 }
             }
         }
+        #[cfg(windows)]
+        {
+            // Extract drive letter from path (e.g. "C:\")
+            if let Some(path_str) = self.path.to_str() {
+                if path_str.len() >= 2 && path_str.as_bytes()[1] == b':' {
+                    if let Ok(output) = std::process::Command::new("wmic")
+                        .args(["logicaldisk", "where", &format!("DeviceID='{}'", &path_str[..2]),
+                               "get", "Size,FreeSpace", "/value"])
+                        .output()
+                    {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        for line in stdout.lines() {
+                            if let Some(val) = line.strip_prefix("Size=") {
+                                self.disk_total = val.trim().parse::<u64>().unwrap_or(0);
+                            } else if let Some(val) = line.strip_prefix("FreeSpace=") {
+                                self.disk_available = val.trim().parse::<u64>().unwrap_or(0);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         self.disk_total = 0;
         self.disk_available = 0;
     }
@@ -1521,13 +1547,13 @@ impl App {
         // Build panels from settings
         let panels: Vec<PanelState> = if settings.panels.is_empty() {
             // No panels configured, create defaults
-            let first = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            let second = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let first = std::env::current_dir().unwrap_or_else(|_| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
+            let second = dirs::home_dir().unwrap_or_else(|| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
             vec![PanelState::new(first), PanelState::new(second)]
         } else {
             settings.panels.iter().map(|ps| {
                 let path = settings.resolve_path(&ps.start_path, || {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+                    std::env::current_dir().unwrap_or_else(|_| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") })
                 });
                 PanelState::with_settings(path, ps)
             }).collect()
@@ -1629,7 +1655,7 @@ impl App {
         }
 
         // Update settings from current state - save panels array
-        let home_path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let home_path = dirs::home_dir().unwrap_or_else(|| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
         self.settings.panels = self.panels.iter().map(|p| {
             // Remote panel paths should not be saved — use home directory instead
             let path = if p.is_remote() {
@@ -2273,15 +2299,24 @@ impl App {
 
         // Execute command with inherited stdio and active panel's directory as CWD
         // Use base64 encoding to avoid shell escaping issues
-        let encoded = encode_command_base64(command);
-        let exe_path = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "cokacdir".to_string());
-        let wrapped_command = format!("eval \"$('{}' --base64 '{}')\"", exe_path, encoded);
+        #[cfg(unix)]
+        let result = {
+            let encoded = encode_command_base64(command);
+            let wrapped_command = format!("eval \"$('{}' --base64 '{}')\"", crate::bin_path(), encoded);
 
-        let result = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&wrapped_command)
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&wrapped_command)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+        };
+
+        #[cfg(windows)]
+        let result = std::process::Command::new("cmd")
+            .args(["/c", command])
             .current_dir(cwd)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -2303,16 +2338,25 @@ impl App {
 
     /// Execute a command in background mode (non-blocking, detached)
     fn execute_background_command(&self, command: &str, template: &str, cwd: &std::path::Path) -> Result<bool, String> {
-        // Use base64 encoding to avoid shell escaping issues
-        let encoded = encode_command_base64(command);
-        let exe_path = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "cokacdir".to_string());
-        let wrapped_command = format!("eval \"$('{}' --base64 '{}')\"", exe_path, encoded);
+        #[cfg(unix)]
+        let result = {
+            // Use base64 encoding to avoid shell escaping issues
+            let encoded = encode_command_base64(command);
+            let wrapped_command = format!("eval \"$('{}' --base64 '{}')\"", crate::bin_path(), encoded);
 
-        let result = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&wrapped_command)
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&wrapped_command)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        };
+
+        #[cfg(windows)]
+        let result = std::process::Command::new("cmd")
+            .args(["/c", command])
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -2495,6 +2539,52 @@ impl App {
         {
             "code"
         } else if Command::new("which")
+            .arg("code-insiders")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            "code-insiders"
+        } else {
+            self.show_message("VS Code not found (tried: code, code-insiders)");
+            return;
+        };
+
+        match Command::new(code_cmd).arg(&path).spawn() {
+            Ok(_) => self.show_message(&format!("Opened in {}: {}", code_cmd, path.display())),
+            Err(e) => self.show_message(&format!("Failed to open {}: {}", code_cmd, e)),
+        }
+    }
+
+    /// Open current folder in Explorer (Windows only)
+    #[cfg(target_os = "windows")]
+    pub fn open_in_explorer(&mut self) {
+        let path = self.active_panel().path.clone();
+        match std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+        {
+            Ok(_) => self.show_message(&format!("Opened in Explorer: {}", path.display())),
+            Err(e) => self.show_message(&format!("Failed to open: {}", e)),
+        }
+    }
+
+    /// Open current folder in VS Code (Windows only)
+    /// Falls back to code-insiders if code is not available
+    #[cfg(target_os = "windows")]
+    pub fn open_in_vscode_win(&mut self) {
+        use std::process::Command;
+
+        let path = self.active_panel().path.clone();
+
+        let code_cmd = if Command::new("where")
+            .arg("code")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            "code"
+        } else if Command::new("where")
             .arg("code-insiders")
             .output()
             .map(|o| o.status.success())
@@ -2929,8 +3019,8 @@ impl App {
         let panel = self.active_panel();
         let remote_path = format!("{}/{}", panel.path.display(), file_name);
         if let Some(ref ctx) = panel.remote_ctx {
-            let tmp_base = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
+            let home = dirs::home_dir()?;
+            let tmp_base = home
                 .join(".cokacdir").join("tmp")
                 .join(format!("{}@{}", ctx.profile.user, ctx.profile.host));
             Some(tmp_base.join(remote_path.trim_start_matches('/')))
@@ -2946,8 +3036,8 @@ impl App {
         let remote_path = format!("{}/{}", panel.path.display(), file_name);
 
         let (profile, tmp_path) = if let Some(ref ctx) = panel.remote_ctx {
-            let tmp_base = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
+            let Some(home) = dirs::home_dir() else { return; };
+            let tmp_base = home
                 .join(".cokacdir").join("tmp")
                 .join(format!("{}@{}", ctx.profile.user, ctx.profile.host));
             let tmp_path = tmp_base.join(remote_path.trim_start_matches('/'));
@@ -3532,8 +3622,13 @@ impl App {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let diff_base = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
+            let Some(home) = dirs::home_dir() else {
+                let _ = tx.send(RemoteSpinnerResult::GitDiffComplete {
+                    result: Err("Failed to get home directory".to_string()),
+                });
+                return;
+            };
+            let diff_base = home
                 .join(".cokacdir")
                 .join("diff");
 
@@ -3551,8 +3646,15 @@ impl App {
             for (dir, hash) in [(&dir1, &hash1), (&dir2, &hash2)] {
                 let repo_str = repo_path.display().to_string();
                 let dir_str = dir.display().to_string();
+                #[cfg(unix)]
                 let status = std::process::Command::new("cp")
                     .args(["-a", &repo_str, &dir_str])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                #[cfg(windows)]
+                let status = std::process::Command::new("xcopy")
+                    .args([&repo_str, &dir_str, "/e", "/h", "/k", "/q", "/y", "/i"])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -3790,7 +3892,7 @@ impl App {
         self.show_message(&format!("{} file(s) cut to clipboard", count));
     }
 
-    /// Paste files from clipboard to current panel (Ctrl+V)
+    /// Paste files from clipboard to current panel (Shift+V)
     pub fn clipboard_paste(&mut self) {
         let clipboard = match self.clipboard.take() {
             Some(cb) => cb,
@@ -3959,7 +4061,7 @@ impl App {
         let target_path = self.active_panel().path.clone();
 
         // Check if source and target are the same (use canonical paths for robustness)
-        let is_same_folder = match (clipboard.source_path.canonicalize(), target_path.canonicalize()) {
+        let is_same_folder = match (clipboard.source_path.canonicalize().map(strip_unc_prefix), target_path.canonicalize().map(strip_unc_prefix)) {
             (Ok(src), Ok(dest)) => src == dest,
             _ => clipboard.source_path == target_path, // Fallback to direct comparison
         };
@@ -3990,7 +4092,7 @@ impl App {
         }
 
         // Get canonical target path for cycle detection
-        let canonical_target = target_path.canonicalize().ok();
+        let canonical_target = target_path.canonicalize().map(strip_unc_prefix).ok();
 
         // Filter out files that would cause cycle
         let mut valid_files: Vec<String> = Vec::new();
@@ -3998,7 +4100,7 @@ impl App {
             let src = clipboard.source_path.join(file_name);
 
             // Check for copying/moving directory into itself
-            if let (Some(ref target_canon), Ok(src_canon)) = (&canonical_target, src.canonicalize()) {
+            if let (Some(ref target_canon), Ok(src_canon)) = (&canonical_target, src.canonicalize().map(strip_unc_prefix)) {
                 if src.is_dir() && target_canon.starts_with(&src_canon) {
                     self.show_message(&format!("Cannot copy '{}' into itself", file_name));
                     continue;
@@ -4524,11 +4626,11 @@ impl App {
         let path = self.active_panel().path.join(name);
 
         // Additional check: ensure the resulting path is within the current directory
-        if let Ok(canonical_parent) = self.active_panel().path.canonicalize() {
-            if let Ok(canonical_new) = path.canonicalize().or_else(|_| {
+        if let Ok(canonical_parent) = self.active_panel().path.canonicalize().map(strip_unc_prefix) {
+            if let Ok(canonical_new) = path.canonicalize().map(strip_unc_prefix).or_else(|_| {
                 // For new directories, check the parent path
                 path.parent()
-                    .and_then(|p| p.canonicalize().ok())
+                    .and_then(|p| p.canonicalize().map(strip_unc_prefix).ok())
                     .map(|p| p.join(name))
                     .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, ""))
             }) {
@@ -4678,10 +4780,10 @@ impl App {
             let new_path = self.active_panel().path.join(new_name);
 
             // Additional check: ensure the new path stays within the current directory
-            if let Ok(canonical_parent) = self.active_panel().path.canonicalize() {
+            if let Ok(canonical_parent) = self.active_panel().path.canonicalize().map(strip_unc_prefix) {
                 // For rename, we verify against parent directory
                 if let Some(new_parent) = new_path.parent() {
-                    if let Ok(canonical_new_parent) = new_parent.canonicalize() {
+                    if let Ok(canonical_new_parent) = new_parent.canonicalize().map(strip_unc_prefix) {
                         if canonical_new_parent != canonical_parent {
                             self.show_message("Error: Path traversal attempt detected");
                             return;
@@ -5472,10 +5574,10 @@ impl App {
                 // Just go to local home - disconnect handles navigation
                 self.disconnect_remote_panel();
                 return;
-            } else if path_str.starts_with("~/") {
+            } else if path_str.starts_with("~/") || path_str.starts_with("~\\") {
                 // Disconnect and fall through to local goto for ~/subdir
                 self.disconnect_remote_panel();
-            } else if path_str.starts_with('/') {
+            } else if path_str.starts_with('/') || (cfg!(windows) && PathBuf::from(path_str).is_absolute()) {
                 // Absolute path: check if it exists on the local filesystem
                 let local_path = PathBuf::from(path_str);
                 if local_path.exists() {
@@ -5499,7 +5601,7 @@ impl App {
             // Normalize the path to resolve .. components
             let normalized = if path_str.starts_with('~') {
                 dirs::home_dir()
-                    .map(|h| h.join(path_str[1..].trim_start_matches('/')))
+                    .map(|h| h.join(path_str[1..].trim_start_matches(['/', '\\'])))
                     .unwrap_or_else(|| PathBuf::from(path_str))
             } else if PathBuf::from(path_str).is_absolute() {
                 PathBuf::from(path_str)
@@ -5508,7 +5610,7 @@ impl App {
             };
 
             // Canonicalize to resolve all .. components
-            match normalized.canonicalize() {
+            match normalized.canonicalize().map(strip_unc_prefix) {
                 Ok(canonical) => {
                     let fallback = self.active_panel().path.clone();
                     let valid_path = get_valid_path(&canonical, &fallback);
@@ -5533,7 +5635,7 @@ impl App {
 
         let path = if path_str.starts_with('~') {
             dirs::home_dir()
-                .map(|h| h.join(path_str[1..].trim_start_matches('/')))
+                .map(|h| h.join(path_str[1..].trim_start_matches(['/', '\\'])))
                 .unwrap_or_else(|| PathBuf::from(path_str))
         } else {
             let p = PathBuf::from(path_str);
@@ -5681,7 +5783,7 @@ impl App {
             ctx.session.disconnect();
         }
         panel.remote_display = None;
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let home = dirs::home_dir().unwrap_or_else(|| if cfg!(windows) { PathBuf::from("C:\\") } else { PathBuf::from("/") });
         panel.path = home;
         panel.selected_index = 0;
         panel.selected_files.clear();
@@ -6006,7 +6108,7 @@ mod tests {
     #[test]
     fn test_get_valid_path_existing() {
         let temp_dir = create_temp_dir();
-        let fallback = PathBuf::from("/tmp");
+        let fallback = std::env::temp_dir();
 
         let result = get_valid_path(&temp_dir, &fallback);
         assert_eq!(result, temp_dir);
@@ -6018,7 +6120,7 @@ mod tests {
     fn test_get_valid_path_nonexistent_uses_parent() {
         let temp_dir = create_temp_dir();
         let nonexistent = temp_dir.join("does_not_exist");
-        let fallback = PathBuf::from("/tmp");
+        let fallback = std::env::temp_dir();
 
         let result = get_valid_path(&nonexistent, &fallback);
         assert_eq!(result, temp_dir);
@@ -6029,17 +6131,20 @@ mod tests {
     #[test]
     fn test_get_valid_path_fallback() {
         let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
-        let fallback = PathBuf::from("/tmp");
+        let fallback = std::env::temp_dir();
 
         let result = get_valid_path(&nonexistent, &fallback);
-        // Should fall back to /tmp or /
         assert!(result.exists());
     }
 
     #[test]
     fn test_get_valid_path_root() {
-        let root = PathBuf::from("/");
-        let fallback = PathBuf::from("/tmp");
+        let root = if cfg!(windows) {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+        let fallback = std::env::temp_dir();
 
         let result = get_valid_path(&root, &fallback);
         assert_eq!(result, root);

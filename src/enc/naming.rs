@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_chunk_filename_with_prefix() {
-        let dir = PathBuf::from("/tmp");
+        let dir = std::env::temp_dir();
         let path = chunk_filename(&dir, "Ab3Z", "a1b2c3d4e5f6a7b8", 0).unwrap();
         assert_eq!(
             path.file_name().unwrap().to_str().unwrap(),
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_chunk_filename_empty_prefix() {
-        let dir = PathBuf::from("/tmp");
+        let dir = std::env::temp_dir();
         let path = chunk_filename(&dir, "", "a1b2c3d4e5f6a7b8", 0).unwrap();
         assert_eq!(
             path.file_name().unwrap().to_str().unwrap(),
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_parse_enc_filename_without_prefix() {
-        let path = PathBuf::from("/tmp/a1b2c3d4e5f6a7b8_aaab.cokacenc");
+        let path = std::env::temp_dir().join("a1b2c3d4e5f6a7b8_aaab.cokacenc");
         let info = parse_enc_filename(&path).unwrap();
         assert_eq!(info.group_id, "a1b2c3d4e5f6a7b8");
         assert_eq!(info.seq_index, 1);
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_parse_enc_filename_with_prefix() {
-        let path = PathBuf::from("/tmp/Ab3Z_a1b2c3d4e5f6a7b8_aaaa.cokacenc");
+        let path = std::env::temp_dir().join("Ab3Z_a1b2c3d4e5f6a7b8_aaaa.cokacenc");
         let info = parse_enc_filename(&path).unwrap();
         assert_eq!(info.group_id, "a1b2c3d4e5f6a7b8");
         assert_eq!(info.seq_index, 0);
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_parse_enc_filename_with_long_prefix() {
-        let path = PathBuf::from("/tmp/Hello9_a1b2c3d4e5f6a7b8_abcd.cokacenc");
+        let path = std::env::temp_dir().join("Hello9_a1b2c3d4e5f6a7b8_abcd.cokacenc");
         let info = parse_enc_filename(&path).unwrap();
         assert_eq!(info.group_id, "a1b2c3d4e5f6a7b8");
         assert_eq!(info.seq_index, 731); // a=0,b=1,c=2,d=3 -> 0*26^3+1*26^2+2*26+3
@@ -245,17 +245,18 @@ mod tests {
 
     #[test]
     fn test_parse_enc_filename_invalid() {
+        let td = std::env::temp_dir();
         // Too short
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/abc.cokacenc")).is_none());
+        assert!(parse_enc_filename(&td.join("abc.cokacenc")).is_none());
         // No underscore before seq
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/a1b2c3d4e5f6a7b8aaaa.cokacenc")).is_none());
+        assert!(parse_enc_filename(&td.join("a1b2c3d4e5f6a7b8aaaa.cokacenc")).is_none());
         // Wrong extension
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/a1b2c3d4e5f6a7b8_aaaa.txt")).is_none());
+        assert!(parse_enc_filename(&td.join("a1b2c3d4e5f6a7b8_aaaa.txt")).is_none());
         // Non-hex group_id
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/g1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
+        assert!(parse_enc_filename(&td.join("g1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
         // Empty key_prefix (just underscore, no content)
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/_a1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
+        assert!(parse_enc_filename(&td.join("_a1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
         // Non-alphanumeric key_prefix
-        assert!(parse_enc_filename(&PathBuf::from("/tmp/a+b_a1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
+        assert!(parse_enc_filename(&td.join("a+b_a1b2c3d4e5f6a7b8_aaaa.cokacenc")).is_none());
     }
 }

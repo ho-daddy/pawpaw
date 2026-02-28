@@ -74,12 +74,9 @@ impl SystemData {
     fn load() -> Self {
         let mut data = Self::default();
 
-        // Hostname
-        #[cfg(unix)]
-        {
-            if let Ok(output) = std::process::Command::new("hostname").output() {
-                data.hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            }
+        // Hostname (works on both Unix and Windows)
+        if let Ok(output) = std::process::Command::new("hostname").output() {
+            data.hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
         }
 
         // Platform and arch
@@ -162,6 +159,69 @@ impl SystemData {
             }
         }
 
+        #[cfg(windows)]
+        {
+            // Kernel/OS version
+            if let Ok(output) = std::process::Command::new("cmd")
+                .args(["/c", "ver"])
+                .output()
+            {
+                let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !ver.is_empty() {
+                    data.kernel = ver;
+                }
+            }
+
+            // Uptime via wmic
+            if let Ok(output) = std::process::Command::new("wmic")
+                .args(["os", "get", "LastBootUpTime", "/value"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Format: LastBootUpTime=20240101120000.000000+540
+                if let Some(val) = stdout.lines().find_map(|l| l.strip_prefix("LastBootUpTime=")) {
+                    if val.len() >= 14 {
+                        if let Ok(boot) = chrono::NaiveDateTime::parse_from_str(&val[..14], "%Y%m%d%H%M%S") {
+                            let now = chrono::Local::now().naive_local();
+                            data.uptime_secs = (now - boot).num_seconds().max(0) as u64;
+                        }
+                    }
+                }
+            }
+
+            // Memory via wmic
+            if let Ok(output) = std::process::Command::new("wmic")
+                .args(["os", "get", "TotalVisibleMemorySize,FreePhysicalMemory", "/value"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(val) = line.strip_prefix("TotalVisibleMemorySize=") {
+                        data.total_mem = val.trim().parse::<u64>().unwrap_or(0) * 1024; // KB to bytes
+                    } else if let Some(val) = line.strip_prefix("FreePhysicalMemory=") {
+                        data.free_mem = val.trim().parse::<u64>().unwrap_or(0) * 1024;
+                    }
+                }
+            }
+
+            // CPU via wmic
+            if let Ok(output) = std::process::Command::new("wmic")
+                .args(["cpu", "get", "Name,NumberOfCores", "/value"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(val) = line.strip_prefix("Name=") {
+                        data.cpu_model = val.trim().to_string();
+                    } else if let Some(val) = line.strip_prefix("NumberOfCores=") {
+                        data.cpu_count = val.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+
+            // Load average not available on Windows
+        }
+
         data
     }
 }
@@ -206,7 +266,59 @@ fn load_disk_info() -> Vec<DiskInfo> {
         }
     }
 
+    #[cfg(windows)]
+    {
+        // wmic logicaldisk get DeviceID,Size,FreeSpace,FileSystem /format:csv
+        if let Ok(output) = std::process::Command::new("wmic")
+            .args(["logicaldisk", "get", "DeviceID,Size,FreeSpace,FileSystem", "/format:csv"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // CSV format: Node,DeviceID,FileSystem,FreeSpace,Size
+                for line in stdout.lines().skip(1) {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() >= 5 {
+                        let device_id = parts[1].trim();
+                        let filesystem = parts[2].trim();
+                        let free_space: u64 = parts[3].trim().parse().unwrap_or(0);
+                        let total_size: u64 = parts[4].trim().parse().unwrap_or(0);
+
+                        if total_size == 0 {
+                            continue;
+                        }
+
+                        let used = total_size - free_space;
+                        let use_percent = ((used as f64 / total_size as f64) * 100.0) as u8;
+
+                        disks.push(DiskInfo {
+                            filesystem: filesystem.to_string(),
+                            size: format_bytes_short(total_size),
+                            used: format_bytes_short(used),
+                            available: format_bytes_short(free_space),
+                            use_percent,
+                            mountpoint: device_id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     disks
+}
+
+#[cfg(windows)]
+fn format_bytes_short(bytes: u64) -> String {
+    if bytes >= 1_099_511_627_776 {
+        format!("{:.1}T", bytes as f64 / 1_099_511_627_776.0)
+    } else if bytes >= 1_073_741_824 {
+        format!("{:.1}G", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1}M", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    }
 }
 
 fn format_uptime(seconds: u64) -> String {

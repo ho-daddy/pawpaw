@@ -212,7 +212,7 @@ impl SftpSession {
             RemoteAuth::KeyFile { path, passphrase } => {
                 let key_path = if path.starts_with('~') {
                     if let Some(home) = dirs::home_dir() {
-                        home.join(path.trim_start_matches('~').trim_start_matches('/'))
+                        home.join(path.trim_start_matches('~').trim_start_matches(['/', '\\']))
                     } else {
                         std::path::PathBuf::from(path)
                     }

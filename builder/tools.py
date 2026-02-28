@@ -93,7 +93,7 @@ class ToolInstaller:
         # Add cargo bin to PATH
         cargo_bin = self.cargo_home / "bin"
         current_path = env.get("PATH", "")
-        env["PATH"] = f"{cargo_bin}:{current_path}"
+        env["PATH"] = f"{cargo_bin}{os.pathsep}{current_path}"
 
         return env
 
@@ -289,6 +289,115 @@ class ToolInstaller:
             self.logger.error("cargo not found. Please install Rust first.")
             return False
 
+    # ==================== cargo-xwin Installation ====================
+
+    def is_cargo_xwin_installed(self) -> bool:
+        """Check if cargo-xwin is installed."""
+        # Check if cargo-xwin binary exists in cargo bin
+        cargo_xwin = self.cargo_home / "bin" / "cargo-xwin"
+        if cargo_xwin.exists():
+            return True
+
+        # Fallback: check if it's in PATH
+        env = self.get_env()
+        try:
+            result = subprocess.run(
+                ["cargo-xwin", "--version"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+
+    def install_cargo_xwin(self) -> bool:
+        """Install cargo-xwin for Windows MSVC cross-compilation."""
+        if self.is_cargo_xwin_installed():
+            self.logger.success("cargo-xwin is already installed")
+            return True
+
+        if not self.is_rust_installed():
+            self.logger.error("Rust must be installed first")
+            return False
+
+        self.logger.info("Installing cargo-xwin...")
+
+        env = self.get_env()
+
+        try:
+            result = subprocess.run(
+                ["cargo", "install", "cargo-xwin"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            if result.returncode == 0:
+                self.logger.success("cargo-xwin installed successfully")
+                return True
+            else:
+                self.logger.error(f"Failed to install cargo-xwin: {result.stderr}")
+                return False
+
+        except FileNotFoundError:
+            self.logger.error("cargo not found. Please install Rust first.")
+            return False
+
+    # ==================== clang/lld Detection ====================
+
+    def is_clang_installed(self) -> bool:
+        """Check if clang is installed."""
+        try:
+            result = subprocess.run(
+                ["clang", "--version"],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+
+    def is_lld_installed(self) -> bool:
+        """Check if lld (LLVM linker) is installed."""
+        # Try lld-link first (used by cargo-xwin on some systems)
+        for cmd in ["lld-link", "ld.lld", "lld"]:
+            try:
+                result = subprocess.run(
+                    [cmd, "--version"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    return True
+            except FileNotFoundError:
+                continue
+        return False
+
+    def is_llvm_lib_installed(self) -> bool:
+        """Check if llvm-lib is installed (needed by cargo-xwin for .lib generation)."""
+        try:
+            result = subprocess.run(
+                ["llvm-lib", "--version"],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+
+    def is_clang_cl_installed(self) -> bool:
+        """Check if clang-cl is installed (needed for Windows ARM64 cross-compilation)."""
+        try:
+            result = subprocess.run(
+                ["clang-cl", "--version"],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+
     # ==================== macOS SDK Installation ====================
 
     def is_macos_sdk_installed(self) -> bool:
@@ -452,7 +561,7 @@ class ToolInstaller:
         return self.install_rust()
 
     def setup_cross_compile(self) -> bool:
-        """Install all required tools for cross-compilation."""
+        """Install all required tools for cross-compilation (zigbuild + macOS SDK)."""
         self.logger.header("Setting up cross-compilation tools")
 
         success = True
@@ -473,8 +582,49 @@ class ToolInstaller:
 
         return success
 
+    def setup_windows_cross(self) -> bool:
+        """Install tools for Windows cross-compilation (cargo-xwin + clang/lld check)."""
+        self.logger.header("Setting up Windows cross-compilation tools")
+
+        success = True
+
+        if not self.install_cargo_xwin():
+            success = False
+
+        if not self.is_clang_installed():
+            self.logger.warning("clang is not installed. Required for cargo-xwin.")
+            self.logger.info("  Install with: apt install clang  (or your package manager)")
+            success = False
+
+        if not self.is_lld_installed():
+            self.logger.warning("lld is not installed. Required for cargo-xwin.")
+            self.logger.info("  Install with: apt install lld  (or your package manager)")
+            success = False
+
+        if not self.is_llvm_lib_installed():
+            self.logger.warning("llvm-lib is not installed. Required for cargo-xwin.")
+            self.logger.info("  Install with: apt install llvm  (or your package manager)")
+            self.logger.info("  If llvm-lib-XX exists but llvm-lib doesn't, create a symlink:")
+            self.logger.info("    sudo ln -s llvm-lib-18 /usr/bin/llvm-lib")
+            success = False
+
+        if not self.is_clang_cl_installed():
+            self.logger.warning("clang-cl is not installed. Required for Windows ARM64 builds.")
+            self.logger.info("  Install with: apt install clang-tools-18  (or matching version)")
+            self.logger.info("  If clang-cl-XX exists but clang-cl doesn't, create a symlink:")
+            self.logger.info("    sudo ln -s clang-cl-18 /usr/bin/clang-cl")
+            success = False
+
+        if success:
+            self.logger.success("All Windows cross-compilation tools ready!")
+        else:
+            self.logger.error("Some Windows cross-compilation tools are missing")
+            self.logger.info("  Or run: sudo ./install_windows_build_deps.sh")
+
+        return success
+
     def setup_all(self) -> bool:
-        """Install all required tools (Rust + cross-compilation)."""
+        """Install all required tools (Rust + cross-compilation). Use --setup-windows for Windows tools."""
         success = True
 
         # Install Rust first
@@ -482,7 +632,7 @@ class ToolInstaller:
             success = False
             return success  # Can't continue without Rust
 
-        # Install cross-compilation tools
+        # Install cross-compilation tools (zigbuild + macOS SDK)
         if not self.setup_cross_compile():
             success = False
 
@@ -512,7 +662,7 @@ class ToolInstaller:
         # Add original PATH
         path_parts.append(env.get("PATH", ""))
 
-        env["PATH"] = ":".join(path_parts)
+        env["PATH"] = os.pathsep.join(path_parts)
 
         # Set SDKROOT for macOS cross-compilation
         if self.sdk_dir.exists():
@@ -552,3 +702,33 @@ class ToolInstaller:
                 self.logger.warning("macOS SDK: Not installed")
             else:
                 self.logger.info("macOS SDK: Not needed on this platform")
+
+        # cargo-xwin (Windows cross-compilation)
+        if self.is_cargo_xwin_installed():
+            self.logger.success("cargo-xwin: Installed")
+        else:
+            self.logger.warning("cargo-xwin: Not installed")
+
+        # clang
+        if self.is_clang_installed():
+            self.logger.success("clang: Installed")
+        else:
+            self.logger.warning("clang: Not installed")
+
+        # lld
+        if self.is_lld_installed():
+            self.logger.success("lld: Installed")
+        else:
+            self.logger.warning("lld: Not installed")
+
+        # llvm-lib
+        if self.is_llvm_lib_installed():
+            self.logger.success("llvm-lib: Installed")
+        else:
+            self.logger.warning("llvm-lib: Not installed")
+
+        # clang-cl
+        if self.is_clang_cl_installed():
+            self.logger.success("clang-cl: Installed")
+        else:
+            self.logger.warning("clang-cl: Not installed")

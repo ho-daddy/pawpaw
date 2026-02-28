@@ -2,7 +2,7 @@
 """
 COKACDIR Rust Build Script
 
-Cross-compilation build system for Linux and macOS platforms.
+Cross-compilation build system for Linux, macOS, and Windows platforms.
 All build tools are installed locally in the builder/tools directory.
 
 Usage:
@@ -49,17 +49,21 @@ Examples:
   %(prog)s                    Build for current platform
   %(prog)s --macos            Cross-compile for macOS (both architectures)
   %(prog)s --linux            Build for Linux (both architectures)
-  %(prog)s --all              Build for all supported platforms
+  %(prog)s --windows          Cross-compile for Windows (both architectures)
+  %(prog)s --all              Build for all platforms (excluding Windows)
+  %(prog)s --all --windows    Build for all platforms including Windows
   %(prog)s --setup            Install all build tools (Rust, zig, etc.)
   %(prog)s --status           Show status of installed tools
   %(prog)s --clean --all      Clean and build all platforms
 
 Targets:
-  native          Current platform (default)
-  macos-arm64     macOS Apple Silicon (aarch64)
-  macos-x86_64    macOS Intel (x86_64)
-  linux-arm64     Linux ARM64
-  linux-x86_64    Linux x86_64
+  native            Current platform (default)
+  macos-arm64       macOS Apple Silicon (aarch64)
+  macos-x86_64      macOS Intel (x86_64)
+  linux-arm64       Linux ARM64
+  linux-x86_64      Linux x86_64
+  windows-x86_64    Windows x86_64
+  windows-arm64     Windows ARM64
 
 Note: All tools are installed locally in builder/tools/ directory.
 """,
@@ -121,6 +125,21 @@ Note: All tools are installed locally in builder/tools/ directory.
         help="Build for Linux x86_64",
     )
     target_group.add_argument(
+        "--windows",
+        action="store_true",
+        help="Build for both Windows targets (x86_64 + arm64)",
+    )
+    target_group.add_argument(
+        "--windows-x86_64",
+        action="store_true",
+        help="Build for Windows x86_64",
+    )
+    target_group.add_argument(
+        "--windows-arm64",
+        action="store_true",
+        help="Build for Windows ARM64",
+    )
+    target_group.add_argument(
         "--all",
         action="store_true",
         help="Build for all supported platforms",
@@ -142,6 +161,11 @@ Note: All tools are installed locally in builder/tools/ directory.
         "--setup-cross",
         action="store_true",
         help="Install cross-compilation tools only (zig, cargo-zigbuild, SDK)",
+    )
+    setup_group.add_argument(
+        "--setup-windows",
+        action="store_true",
+        help="Install Windows cross-compilation tools only (cargo-xwin)",
     )
     setup_group.add_argument(
         "--status",
@@ -202,6 +226,14 @@ def collect_targets(args: argparse.Namespace) -> list:
             if args.linux_x86_64:
                 targets.append("linux-x86_64")
 
+        if args.windows:
+            targets.append("windows")
+        else:
+            if args.windows_x86_64:
+                targets.append("windows-x86_64")
+            if args.windows_arm64:
+                targets.append("windows-arm64")
+
     # Positional targets
     targets.extend(args.targets)
 
@@ -231,12 +263,23 @@ def ensure_rust_installed(tool_installer: ToolInstaller, logger: Logger, auto_se
 
 
 def needs_cross_compilation(targets: list) -> bool:
-    """Check if any target requires cross-compilation tools."""
+    """Check if any target requires cross-compilation tools (zigbuild)."""
     for target in targets:
         target = target.lower()
         if target in ("macos", "macos-arm64", "macos-x86_64", "all"):
             return True
         if target in RUST_TARGETS and "apple-darwin" in RUST_TARGETS[target]:
+            return True
+    return False
+
+
+def needs_windows_cross(targets: list) -> bool:
+    """Check if any target requires Windows cross-compilation tools (cargo-xwin)."""
+    for target in targets:
+        target = target.lower()
+        if target in ("windows", "windows-x86_64", "windows-arm64"):
+            return True
+        if target in RUST_TARGETS and "windows" in RUST_TARGETS[target]:
             return True
     return False
 
@@ -293,6 +336,13 @@ def main() -> int:
         success = tool_installer.setup_cross_compile()
         return 0 if success else 1
 
+    if args.setup_windows:
+        # Ensure Rust is installed first
+        if not ensure_rust_installed(tool_installer, logger, not args.no_auto_setup):
+            return 1
+        success = tool_installer.setup_windows_cross()
+        return 0 if success else 1
+
     # Building mode - ensure Rust is installed
     auto_setup = not args.no_auto_setup
     if not ensure_rust_installed(tool_installer, logger, auto_setup):
@@ -318,6 +368,20 @@ def main() -> int:
             else:
                 logger.error("Cross-compilation tools not installed.")
                 logger.info("Run with --setup or --setup-cross first.")
+                return 1
+
+    # Check if Windows cross-compilation is needed
+    if needs_windows_cross(targets):
+        if not tool_installer.is_cargo_xwin_installed() or not tool_installer.is_clang_installed() or not tool_installer.is_lld_installed() or not tool_installer.is_llvm_lib_installed() or not tool_installer.is_clang_cl_installed():
+            if auto_setup:
+                logger.warning("Windows cross-compilation tools not installed. Installing...")
+                logger.newline()
+                if not tool_installer.setup_windows_cross():
+                    logger.error("Failed to install Windows cross-compilation tools")
+                    return 1
+            else:
+                logger.error("Windows cross-compilation tools not installed.")
+                logger.info("Run with --setup or --setup-windows first.")
                 return 1
 
     # Run build

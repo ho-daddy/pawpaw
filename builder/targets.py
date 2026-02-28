@@ -16,9 +16,10 @@ class Target:
 
     rust_target: str  # e.g., "aarch64-apple-darwin"
     friendly_name: str  # e.g., "macos-aarch64"
-    platform: str  # "macos" or "linux"
+    platform: str  # "macos", "linux", or "windows"
     arch: str  # "aarch64" or "x86_64"
     needs_zigbuild: bool = False  # True for cross-platform macOS builds
+    needs_xwin: bool = False  # True for Windows MSVC cross-compilation
     is_native: bool = False  # True if this is the native target
 
     @classmethod
@@ -31,6 +32,8 @@ class Target:
             platform = "macos"
         elif "linux" in rust_target:
             platform = "linux"
+        elif "windows" in rust_target:
+            platform = "windows"
         else:
             platform = "unknown"
 
@@ -41,13 +44,19 @@ class Target:
         else:
             arch = "unknown"
 
-        # Determine if zigbuild is needed
+        # Determine if zigbuild is needed (not for Windows targets)
         # 1. macOS targets when building on Linux
         # 2. Linux cross-architecture builds (e.g., aarch64 -> x86_64)
         needs_zigbuild = (
-            (platform == "macos" and config.host_os == "linux") or
-            (platform == "linux" and config.host_os == "linux" and arch != config.host_arch)
+            platform != "windows" and (
+                (platform == "macos" and config.host_os == "linux") or
+                (platform == "linux" and config.host_os == "linux" and arch != config.host_arch)
+            )
         )
+
+        # Determine if cargo-xwin is needed (Windows MSVC cross-compilation)
+        # Not needed when building on Windows natively
+        needs_xwin = platform == "windows" and config.host_os != "windows"
 
         # Check if native
         is_native = (platform == config.host_os) and (arch == config.host_arch)
@@ -58,6 +67,7 @@ class Target:
             platform=platform,
             arch=arch,
             needs_zigbuild=needs_zigbuild,
+            needs_xwin=needs_xwin,
             is_native=is_native,
         )
 
@@ -154,9 +164,9 @@ class TargetManager:
                     seen.add(native_target.rust_target)
 
             elif spec == "all":
-                # Add all targets
-                for rust_target in RUST_TARGETS.values():
-                    if rust_target not in seen:
+                # Add all targets (excluding Windows — use --windows explicitly)
+                for name, rust_target in RUST_TARGETS.items():
+                    if "windows" not in name and rust_target not in seen:
                         target = Target.from_rust_target(rust_target, self.config)
                         resolved.append(target)
                         seen.add(rust_target)
@@ -173,6 +183,14 @@ class TargetManager:
                 # Add both Linux targets
                 for name, rust_target in RUST_TARGETS.items():
                     if "linux" in name and rust_target not in seen:
+                        target = Target.from_rust_target(rust_target, self.config)
+                        resolved.append(target)
+                        seen.add(rust_target)
+
+            elif spec == "windows":
+                # Add both Windows targets
+                for name, rust_target in RUST_TARGETS.items():
+                    if "windows" in name and rust_target not in seen:
                         target = Target.from_rust_target(rust_target, self.config)
                         resolved.append(target)
                         seen.add(rust_target)

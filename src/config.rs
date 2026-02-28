@@ -7,6 +7,8 @@ use crate::ui::theme::{Theme, DEFAULT_THEME_NAME};
 use crate::services::remote::RemoteProfile;
 use crate::keybindings::KeybindingsConfig;
 
+use crate::utils::format::strip_unc_prefix;
+
 /// Panel-specific settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelSettings {
@@ -111,28 +113,55 @@ impl Default for Settings {
         let mut extension_handler = HashMap::new();
         // First element: confirmation prompt with filepath - 'y' or Enter runs, anything else exits
         // Subsequent elements: actual execution commands with fallback
-        extension_handler.insert(
-            "sh".to_string(),
-            vec![
-                "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
-                "/bin/bash -c \"$(cat '{{FILEPATH}}')\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
-            ],
-        );
-        extension_handler.insert(
-            "py".to_string(),
-            vec![
-                "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
-                "python \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
-                "python3 \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
-            ],
-        );
-        extension_handler.insert(
-            "js".to_string(),
-            vec![
-                "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
-                "node \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
-            ],
-        );
+        #[cfg(unix)]
+        {
+            extension_handler.insert(
+                "sh".to_string(),
+                vec![
+                    "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
+                    "/bin/bash -c \"$(cat '{{FILEPATH}}')\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
+                ],
+            );
+            extension_handler.insert(
+                "py".to_string(),
+                vec![
+                    "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
+                    "python \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
+                    "python3 \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
+                ],
+            );
+            extension_handler.insert(
+                "js".to_string(),
+                vec![
+                    "read -p 'Run \"{{FILEPATH}}\"? (Y/n) ' a && [ -n \"$a\" ] && [ \"$a\" != \"y\" ]".to_string(),
+                    "node \"{{FILEPATH}}\" && echo 'Press any key to return...' && read -n 1 -s".to_string(),
+                ],
+            );
+        }
+        #[cfg(windows)]
+        {
+            extension_handler.insert(
+                "bat".to_string(),
+                vec![
+                    "choice /c YN /n /m \"Run {{FILEPATH}}? [Y/N] \" & if errorlevel 2 exit /b 0 & exit /b 1".to_string(),
+                    "cmd /c \"{{FILEPATH}}\" & pause >nul".to_string(),
+                ],
+            );
+            extension_handler.insert(
+                "py".to_string(),
+                vec![
+                    "choice /c YN /n /m \"Run {{FILEPATH}}? [Y/N] \" & if errorlevel 2 exit /b 0 & exit /b 1".to_string(),
+                    "python \"{{FILEPATH}}\" & pause >nul".to_string(),
+                ],
+            );
+            extension_handler.insert(
+                "js".to_string(),
+                vec![
+                    "choice /c YN /n /m \"Run {{FILEPATH}}? [Y/N] \" & if errorlevel 2 exit /b 0 & exit /b 1".to_string(),
+                    "node \"{{FILEPATH}}\" & pause >nul".to_string(),
+                ],
+            );
+        }
 
         Self {
             theme: ThemeSettings::default(),
@@ -287,6 +316,7 @@ impl Settings {
 
             // Canonicalize to resolve symlinks and verify the path exists
             if let Ok(canonical) = path.canonicalize() {
+                let canonical = strip_unc_prefix(canonical);
                 if canonical.is_dir() {
                     return canonical;
                 }
@@ -296,6 +326,7 @@ impl Settings {
             let mut current = path;
             while let Some(parent) = current.parent() {
                 if let Ok(canonical_parent) = parent.canonicalize() {
+                    let canonical_parent = strip_unc_prefix(canonical_parent);
                     if canonical_parent.is_dir() {
                         return canonical_parent;
                     }
@@ -343,9 +374,10 @@ mod tests {
 
     #[test]
     fn test_parse_partial_json() {
-        let json = r#"{"panels":[{"start_path":"/tmp"}]}"#;
-        let settings: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(settings.panels[0].start_path, Some("/tmp".to_string()));
+        let test_path = std::env::temp_dir().display().to_string();
+        let json = format!(r#"{{"panels":[{{"start_path":"{}"}}]}}"#, test_path.replace('\\', "\\\\"));
+        let settings: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(settings.panels[0].start_path, Some(test_path));
         assert_eq!(settings.panels[0].sort_by, "name");
     }
 

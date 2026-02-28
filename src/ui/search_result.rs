@@ -269,9 +269,9 @@ pub fn draw(
         // 인덱스 번호
         let index_str = format!("{:3} ", actual_index + 1);
 
-        // 경로 (디렉토리면 / 추가)
+        // 경로 (디렉토리면 구분자 추가)
         let path_display = if item.is_directory {
-            format!("{}/", item.relative_path)
+            format!("{}{}", item.relative_path, std::path::MAIN_SEPARATOR)
         } else {
             item.relative_path.clone()
         };

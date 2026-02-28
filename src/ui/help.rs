@@ -257,6 +257,11 @@ fn build_help_content(theme: &Theme, kb: &Keybindings) -> Vec<Line<'static>> {
         lines.push(pk(PanelAction::OpenInFinder, "Open folder in Finder"));
         lines.push(pk(PanelAction::OpenInVSCode, "Open folder in VS Code"));
     }
+    #[cfg(target_os = "windows")]
+    {
+        lines.push(pk(PanelAction::OpenInExplorer, "Open folder in Explorer"));
+        lines.push(pk(PanelAction::OpenInVSCode, "Open folder in VS Code"));
+    }
     lines.push(Line::from(""));
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -510,6 +515,11 @@ fn build_help_content(theme: &Theme, kb: &Keybindings) -> Vec<Line<'static>> {
         #[cfg(target_os = "macos")]
         {
             qr_items.push((PanelAction::OpenInFinder, "finder "));
+            qr_items.push((PanelAction::OpenInVSCode, "vscode "));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            qr_items.push((PanelAction::OpenInExplorer, "explorer "));
             qr_items.push((PanelAction::OpenInVSCode, "vscode "));
         }
         qr_items.push((PanelAction::Settings, "set "));

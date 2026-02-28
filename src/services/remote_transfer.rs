@@ -82,7 +82,7 @@ impl SshExec {
                 RemoteAuth::KeyFile { path, passphrase } => {
                     let key_path = if path.starts_with('~') {
                         if let Some(home) = dirs::home_dir() {
-                            home.join(path.trim_start_matches('~').trim_start_matches('/'))
+                            home.join(path.trim_start_matches('~').trim_start_matches(['/', '\\']))
                         } else {
                             PathBuf::from(path)
                         }
@@ -186,7 +186,7 @@ fn build_ssh_option(profile: &RemoteProfile) -> String {
     if let RemoteAuth::KeyFile { ref path, .. } = profile.auth {
         let expanded = if path.starts_with('~') {
             if let Some(home) = dirs::home_dir() {
-                home.join(path.trim_start_matches('~').trim_start_matches('/'))
+                home.join(path.trim_start_matches('~').trim_start_matches(['/', '\\']))
                     .display()
                     .to_string()
             } else {
@@ -199,7 +199,10 @@ fn build_ssh_option(profile: &RemoteProfile) -> String {
     }
 
     // Disable strict host key checking for convenience
+    #[cfg(unix)]
     ssh_cmd.push_str(" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR");
+    #[cfg(windows)]
+    ssh_cmd.push_str(" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o LogLevel=ERROR");
 
     ssh_cmd
 }
@@ -216,27 +219,45 @@ fn build_remote_spec(profile: &RemoteProfile, path: &str) -> String {
 /// Create a temporary SSH_ASKPASS script for password authentication.
 /// Returns the script path. Caller must clean up with cleanup_askpass_script().
 fn create_askpass_script(password: &str) -> Result<PathBuf, String> {
-    let tmp_dir = dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".cokacdir")
-        .join("tmp");
+    let home = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let tmp_dir = home.join(".cokacdir").join("tmp");
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("Failed to create tmp dir: {}", e))?;
 
+    #[cfg(unix)]
     let script_path = tmp_dir.join(format!("askpass_{}", std::process::id()));
-
-    // Escape single quotes in password: replace ' with '\''
-    let escaped = password.replace('\'', "'\\''");
-    let content = format!("#!/bin/sh\necho '{}'\n", escaped);
-
-    std::fs::write(&script_path, content)
-        .map_err(|e| format!("Failed to create askpass script: {}", e))?;
+    #[cfg(windows)]
+    let script_path = tmp_dir.join(format!("askpass_{}.bat", std::process::id()));
 
     #[cfg(unix)]
     {
+        // Escape single quotes in password: replace ' with '\''
+        let escaped = password.replace('\'', "'\\''");
+        let content = format!("#!/bin/sh\necho '{}'\n", escaped);
+
+        std::fs::write(&script_path, content)
+            .map_err(|e| format!("Failed to create askpass script: {}", e))?;
+
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("Failed to set script permissions: {}", e))?;
+    }
+
+    #[cfg(windows)]
+    {
+        // Escape CMD special characters in password
+        let escaped = password
+            .replace('^', "^^")
+            .replace('&', "^&")
+            .replace('|', "^|")
+            .replace('<', "^<")
+            .replace('>', "^>")
+            .replace('%', "%%");
+        let content = format!("@echo off\necho {}\n", escaped);
+
+        std::fs::write(&script_path, content)
+            .map_err(|e| format!("Failed to create askpass script: {}", e))?;
     }
 
     Ok(script_path)
@@ -701,10 +722,15 @@ pub fn transfer_remote_to_remote_with_progress(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let base_tmp = dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".cokacdir")
-        .join("tmp");
+    let Some(home) = dirs::home_dir() else {
+        let _ = tx.send(ProgressMessage::Error(
+            String::new(),
+            "Failed to get home directory".to_string(),
+        ));
+        let _ = tx.send(ProgressMessage::Completed(0, total_files));
+        return;
+    };
+    let base_tmp = home.join(".cokacdir").join("tmp");
     let temp_dir = base_tmp.join(format!("r2r_{}", temp_id));
     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
         let _ = tx.send(ProgressMessage::Error(

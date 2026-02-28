@@ -32,7 +32,11 @@ const MIN_SAFE_PID: i32 = 300;
 
 /// Validate PID is a safe positive integer
 fn is_valid_pid(pid: i32) -> bool {
-    pid > 0 && pid <= 4194304 // Max PID on Linux
+    if cfg!(unix) {
+        pid > 0 && pid <= 4194304 // Max PID on Linux
+    } else {
+        pid > 0 // Windows PIDs can exceed Linux max
+    }
 }
 
 /// Check if PID is protected from being killed
@@ -72,6 +76,7 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
 }
 
 /// Get list of running processes with error handling
+#[cfg(unix)]
 pub fn get_process_list_result() -> ProcessListResult {
     let output = Command::new("ps")
         .args(["aux"])
@@ -98,6 +103,34 @@ pub fn get_process_list_result() -> ProcessListResult {
     Ok(processes)
 }
 
+#[cfg(windows)]
+pub fn get_process_list_result() -> ProcessListResult {
+    let output = Command::new("tasklist")
+        .args(["/FO", "CSV", "/V"])
+        .output()
+        .map_err(|e| format!("Failed to execute tasklist command: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("tasklist command failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes: Vec<ProcessInfo> = stdout
+        .lines()
+        .skip(1) // Skip header line
+        .filter_map(parse_tasklist_csv_line)
+        .collect();
+
+    // Sort by CPU usage descending by default (cpu is always 0.0 from tasklist)
+    processes.sort_by(|a, b| {
+        b.rss.cmp(&a.rss) // Sort by memory instead since cpu% is unavailable
+    });
+
+    Ok(processes)
+}
+
+#[cfg(unix)]
 fn parse_process_line(line: &str) -> Option<ProcessInfo> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 11 {
@@ -123,6 +156,57 @@ fn parse_process_line(line: &str) -> Option<ProcessInfo> {
         time: parts[9].to_string(),
         command: parts[10..].join(" "),
     })
+}
+
+/// Parse a line from `tasklist /FO CSV /V` output
+/// Format: "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name","CPU Time","Window Title"
+#[cfg(windows)]
+fn parse_tasklist_csv_line(line: &str) -> Option<ProcessInfo> {
+    let fields: Vec<&str> = parse_csv_line(line);
+    if fields.len() < 9 {
+        return None;
+    }
+
+    let pid = fields[1].parse::<i32>().ok()?;
+    let mem_str = fields[4].replace(" K", "").replace(",", "").replace("\"", "");
+    let rss = mem_str.trim().parse::<u64>().unwrap_or(0);
+
+    Some(ProcessInfo {
+        pid,
+        user: fields[6].to_string(),
+        cpu: 0.0,  // tasklist doesn't provide CPU%
+        mem: 0.0,
+        vsz: 0,
+        rss,
+        tty: fields[2].to_string(),  // Session Name
+        stat: fields[5].to_string(), // Status
+        start: String::new(),
+        time: fields[7].to_string(), // CPU Time
+        command: fields[0].to_string(), // Image Name
+    })
+}
+
+/// Simple CSV line parser that handles quoted fields
+#[cfg(windows)]
+fn parse_csv_line(line: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let bytes = line.as_bytes();
+
+    for i in 0..bytes.len() {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+        } else if bytes[i] == b',' && !in_quotes {
+            let field = &line[start..i];
+            fields.push(field.trim_matches('"'));
+            start = i + 1;
+        }
+    }
+    if start < line.len() {
+        fields.push(line[start..].trim_matches('"'));
+    }
+    fields
 }
 
 /// Get process start time from /proc/[pid]/stat for additional PID validation
@@ -169,6 +253,7 @@ pub fn kill_process(pid: i32) -> Result<(), String> {
 }
 
 /// Kill a process by PID with optional starttime verification
+#[cfg(unix)]
 pub fn kill_process_with_verification(pid: i32, starttime: Option<u64>) -> Result<(), String> {
     if !is_valid_pid(pid) {
         return Err("Invalid PID".to_string());
@@ -198,12 +283,35 @@ pub fn kill_process_with_verification(pid: i32, starttime: Option<u64>) -> Resul
     }
 }
 
+#[cfg(windows)]
+pub fn kill_process_with_verification(pid: i32, _starttime: Option<u64>) -> Result<(), String> {
+    if !is_valid_pid(pid) {
+        return Err("Invalid PID".to_string());
+    }
+
+    let command = get_process_command(pid);
+    is_protected_pid(pid, command.as_deref())?;
+
+    let output = Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
 /// Force kill a process by PID (SIGKILL)
 pub fn force_kill_process(pid: i32) -> Result<(), String> {
     force_kill_process_with_verification(pid, None)
 }
 
 /// Force kill a process by PID (SIGKILL) with optional starttime verification
+#[cfg(unix)]
 pub fn force_kill_process_with_verification(pid: i32, starttime: Option<u64>) -> Result<(), String> {
     if !is_valid_pid(pid) {
         return Err("Invalid PID".to_string());
@@ -231,7 +339,30 @@ pub fn force_kill_process_with_verification(pid: i32, starttime: Option<u64>) ->
     }
 }
 
+#[cfg(windows)]
+pub fn force_kill_process_with_verification(pid: i32, _starttime: Option<u64>) -> Result<(), String> {
+    if !is_valid_pid(pid) {
+        return Err("Invalid PID".to_string());
+    }
+
+    let command = get_process_command(pid);
+    is_protected_pid(pid, command.as_deref())?;
+
+    let output = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output()
+        .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
 /// Get process command by PID
+#[cfg(unix)]
 fn get_process_command(pid: i32) -> Option<String> {
     // Use "command=" format to suppress header (POSIX compatible, works on Linux and macOS)
     let output = Command::new("ps")
@@ -248,6 +379,24 @@ fn get_process_command(pid: i32) -> Option<String> {
     }
 }
 
+#[cfg(windows)]
+fn get_process_command(pid: i32) -> Option<String> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.trim();
+    if line.is_empty() || line.contains("No tasks") {
+        None
+    } else {
+        // First field is the image name
+        line.split(',').next()
+            .map(|s| s.trim_matches('"').to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +408,7 @@ mod tests {
         assert!(is_valid_pid(1));
         assert!(is_valid_pid(100));
         assert!(is_valid_pid(1000));
+        #[cfg(unix)]
         assert!(is_valid_pid(4194304)); // Max PID on Linux
     }
 
@@ -267,7 +417,8 @@ mod tests {
         assert!(!is_valid_pid(0));
         assert!(!is_valid_pid(-1));
         assert!(!is_valid_pid(-100));
-        assert!(!is_valid_pid(4194305)); // Exceeds max PID
+        #[cfg(unix)]
+        assert!(!is_valid_pid(4194305)); // Exceeds max PID on Linux
     }
 
     // ========== is_protected_pid tests ==========
@@ -343,6 +494,7 @@ mod tests {
 
     // ========== parse_process_line tests ==========
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_process_line_valid() {
         let line = "root         1  0.0  0.1  12345  6789 ?        Ss   Jan01   0:05 /sbin/init";
@@ -357,6 +509,7 @@ mod tests {
         assert_eq!(info.command, "/sbin/init");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_process_line_invalid_short() {
         let line = "root 1 0.0"; // Too few fields
@@ -364,6 +517,7 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_process_line_command_with_spaces() {
         let line = "user     12345  1.5  2.3  54321  9876 pts/0    S+   10:00   0:01 /usr/bin/program --arg value";

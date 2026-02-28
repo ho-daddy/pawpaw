@@ -192,11 +192,11 @@ fn git_commit_cmd(path: &Path) -> Command {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !has_name {
-        let user = std::env::var("USER").unwrap_or_else(|_| "User".to_string());
+        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "User".to_string());
         cmd.arg("-c").arg(format!("user.name={}", user));
     }
     if !has_email {
-        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".to_string());
         cmd.arg("-c").arg(format!("user.email={}@localhost", user));
     }
     cmd

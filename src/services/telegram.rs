@@ -467,6 +467,11 @@ pub fn resolve_current_path_for_chat(chat_id: i64, hash_key: &str) -> Option<Str
     last_sessions.get(&chat_key)?.as_str().map(String::from)
 }
 
+/// Get the binary path normalized for shell commands (backslashes → forward slashes on Windows)
+fn shell_bin_path() -> String {
+    crate::utils::format::to_shell_path(crate::bin_path())
+}
+
 /// Build the system prompt for Telegram AI sessions
 fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &str, disabled_notice: &str, session_id: Option<&str>) -> String {
     let session_notice = match session_id {
@@ -497,16 +502,16 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
          All commands output JSON. Success: {{\"status\":\"ok\",...}}, Error: {{\"status\":\"error\",\"message\":\"...\"}}\n\n\
          ── FILE DELIVERY ──\n\
          Send a file to the user's Telegram chat:\n\
-         cokacdir --sendfile <FILEPATH> --chat {chat_id} --key {bot_key}\n\
+         \"{bin}\" --sendfile <FILEPATH> --chat {chat_id} --key {bot_key}\n\
          • Use this whenever your work produces a file (code, reports, images, archives, etc.)\n\
          • Do NOT tell the user to use /down — always use this command instead\n\
          • Output: {{\"status\":\"ok\",\"path\":\"<absolute_path>\"}}\n\n\
          ── SERVER TIME ──\n\
          Get current server time (use before scheduling to confirm timezone):\n\
-         cokacdir --currenttime\n\
+         \"{bin}\" --currenttime\n\
          • Output: {{\"status\":\"ok\",\"time\":\"2026-02-25 14:30:00\"}}\n\n\
          ── SCHEDULE: REGISTER ──\n\
-         cokacdir --cron \"<PROMPT>\" --at \"<TIME>\" --chat {chat_id} --key {bot_key} [--once] [--session <SESSION_ID>]\n\
+         \"{bin}\" --cron \"<PROMPT>\" --at \"<TIME>\" --chat {chat_id} --key {bot_key} [--once] [--session <SESSION_ID>]\n\
          • Three schedule types:\n\
            1. ABSOLUTE (one-time): --at \"2026-02-25 18:00:00\" or --at \"30m\"/\"4h\"/\"1d\"\n\
               Runs once at the specified time, then auto-deleted.\n\
@@ -521,20 +526,21 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
            2. ★ MUST be in the user's language (한국어 사용자 → 한국어, English user → English)\n\
          • Output: {{\"status\":\"ok\",\"id\":\"...\",\"prompt\":\"...\",\"schedule\":\"...\"}}{session_notice}\n\n\
          ── SCHEDULE: LIST ──\n\
-         cokacdir --cron-list --chat {chat_id} --key {bot_key}\n\
+         \"{bin}\" --cron-list --chat {chat_id} --key {bot_key}\n\
          • Output: {{\"status\":\"ok\",\"schedules\":[{{\"id\":\"...\",\"prompt\":\"...\",\"schedule\":\"...\",\"created_at\":\"...\"}},...]}}\n\n\
          ── SCHEDULE: REMOVE ──\n\
-         cokacdir --cron-remove <SCHEDULE_ID> --chat {chat_id} --key {bot_key}\n\
+         \"{bin}\" --cron-remove <SCHEDULE_ID> --chat {chat_id} --key {bot_key}\n\
          • Output: {{\"status\":\"ok\",\"id\":\"...\"}}\n\n\
          ── SCHEDULE: UPDATE TIME ──\n\
-         cokacdir --cron-update <SCHEDULE_ID> --at \"<NEW_TIME>\" --chat {chat_id} --key {bot_key}\n\
+         \"{bin}\" --cron-update <SCHEDULE_ID> --at \"<NEW_TIME>\" --chat {chat_id} --key {bot_key}\n\
          • --at accepts the same formats as --cron\n\
          • Output: {{\"status\":\"ok\",\"id\":\"...\",\"schedule\":\"...\"}}\n\n\
          ═══════════════════════════════════════{disabled_notice}",
         role = role,
-        current_path = current_path,
+        current_path = crate::utils::format::to_shell_path(current_path),
         chat_id = chat_id,
         bot_key = bot_key,
+        bin = shell_bin_path(),
         disabled_notice = disabled_notice,
         session_notice = session_notice,
     )
@@ -1206,9 +1212,9 @@ async fn handle_start_command(
         new_dir.display().to_string()
     } else {
         // Expand ~ to home directory
-        let expanded = if path_str.starts_with("~/") || path_str == "~" {
+        let expanded = if path_str.starts_with("~/") || path_str.starts_with("~\\") || path_str == "~" {
             if let Some(home) = dirs::home_dir() {
-                home.join(path_str.strip_prefix("~/").unwrap_or("")).display().to_string()
+                home.join(path_str.strip_prefix("~/").or_else(|| path_str.strip_prefix("~\\")).unwrap_or("")).display().to_string()
             } else {
                 path_str.to_string()
             }
@@ -1224,6 +1230,7 @@ async fn handle_start_command(
             return Ok(());
         }
         path.canonicalize()
+            .map(crate::utils::format::strip_unc_prefix)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| expanded)
     };
@@ -1362,6 +1369,7 @@ async fn handle_workspace_resume(
     }
 
     let canonical_path = workspace_path.canonicalize()
+        .map(crate::utils::format::strip_unc_prefix)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| workspace_path.display().to_string());
 
@@ -1438,6 +1446,8 @@ async fn handle_clear_command(
             if let Some(pid) = *guard {
                 #[cfg(unix)]
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                #[cfg(windows)]
+                { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
             }
         }
     }
@@ -1555,6 +1565,8 @@ async fn handle_stop_command(
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
                 }
             }
 
@@ -1596,7 +1608,7 @@ async fn handle_down_command(
             data.sessions.get(&chat_id).and_then(|s| s.current_path.clone())
         };
         match current_path {
-            Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
+            Some(base) => Path::new(base.trim_end_matches(['/', '\\'])).join(file_path).display().to_string(),
             None => {
                 shared_rate_limit_wait(state, chat_id).await;
                 tg!("send_message", bot.send_message(chat_id, "No active session. Use absolute path or /start <path> first.")
@@ -1751,7 +1763,7 @@ async fn handle_shell_command(
             .unwrap_or_else(|| {
                 dirs::home_dir()
                     .map(|h| h.display().to_string())
-                    .unwrap_or_else(|| "/".to_string())
+                    .unwrap_or_else(|| if cfg!(windows) { "C:\\".to_string() } else { "/".to_string() })
             })
     };
 
@@ -1779,8 +1791,19 @@ async fn handle_shell_command(
 
     // Spawn blocking thread for shell command execution
     tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
         let child = std::process::Command::new("bash")
             .args(["-c", &cmd_owned])
+            .current_dir(&working_dir_clone)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        #[cfg(windows)]
+        let ps_command = format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {}; exit $LASTEXITCODE", cmd_owned);
+        #[cfg(windows)]
+        let child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_command])
             .current_dir(&working_dir_clone)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1932,46 +1955,59 @@ async fn handle_shell_command(
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, err).await);
                 } else {
+                    // Only show exit code when non-zero
+                    let exit_suffix = if exit_code != 0 {
+                        format!(" (exit code: {})", exit_code)
+                    } else {
+                        String::new()
+                    };
+
                     if !full_output.trim().is_empty() {
                         let file_content = format!("$ {}\n\n{}", cmd_display_owned, full_output);
                         let content_bytes = file_content.len();
 
                         if content_bytes <= 4000 {
                             // Short output: update placeholder with completion + result in one call
-                            let combined = format!("Done <code>{}</code> (exit code: {})\n\n<pre>$ {}\n\n{}</pre>",
-                                html_escape(&cmd_display_owned), exit_code,
+                            let combined = format!("Done <code>{}</code>{}\n\n<pre>$ {}\n\n{}</pre>",
+                                html_escape(&cmd_display_owned), exit_suffix,
                                 html_escape(&cmd_display_owned), html_escape(full_output.trim()));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &combined)
                                 .parse_mode(ParseMode::Html)
                                 .await)
                             {
-                                let fallback = format!("Done {} (exit code: {})\n\n$ {}\n\n{}",
-                                    cmd_display_owned, exit_code, cmd_display_owned, full_output.trim());
+                                let fallback = format!("Done {}{}\n\n$ {}\n\n{}",
+                                    cmd_display_owned, exit_suffix, cmd_display_owned, full_output.trim());
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &fallback).await);
                             }
                         } else {
                             // Long output: update placeholder + send as .txt file
-                            let final_msg = format!("Done <code>{}</code> (exit code: {})", html_escape(&cmd_display_owned), exit_code);
+                            let final_msg = format!("Done <code>{}</code>{}", html_escape(&cmd_display_owned), exit_suffix);
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg)
                                 .parse_mode(ParseMode::Html).await);
 
                             let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                            let tmp_path = format!("/tmp/cokacdir_shell_{}_{}.txt", chat_id.0, timestamp);
-                            if std::fs::write(&tmp_path, &file_content).is_ok() {
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = tg!("send_document", bot_owned.send_document(
-                                    chat_id,
-                                    teloxide::types::InputFile::file(std::path::Path::new(&tmp_path)),
-                                ).await);
-                                let _ = std::fs::remove_file(&tmp_path);
+                            if let Some(home) = dirs::home_dir() {
+                                let tmp_dir = home.join(".cokacdir").join("tmp");
+                                let _ = std::fs::create_dir_all(&tmp_dir);
+                                let tmp_path = tmp_dir
+                                    .join(format!("cokacdir_shell_{}_{}.txt", chat_id.0, timestamp))
+                                    .display().to_string();
+                                if std::fs::write(&tmp_path, &file_content).is_ok() {
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let _ = tg!("send_document", bot_owned.send_document(
+                                        chat_id,
+                                        teloxide::types::InputFile::file(std::path::Path::new(&tmp_path)),
+                                    ).await);
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                }
                             }
                         }
                     } else {
                         // No output
-                        let final_msg = format!("Done <code>{}</code> (exit code: {})", html_escape(&cmd_display_owned), exit_code);
+                        let final_msg = format!("Done <code>{}</code>{}", html_escape(&cmd_display_owned), exit_suffix);
                         shared_rate_limit_wait(&state_owned, chat_id).await;
                         let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg)
                             .parse_mode(ParseMode::Html).await);
@@ -1997,6 +2033,8 @@ async fn handle_shell_command(
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
                 }
             }
 
@@ -2814,6 +2852,8 @@ async fn handle_text_message(
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
                 }
             }
 
@@ -3419,9 +3459,29 @@ fn detect_cokacdir_command(name: &str, input: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
     let trimmed = cmd.trim_start();
-    if !trimmed.starts_with("cokacdir") { return None; }
-    // Extract the first --xxx flag after "cokacdir"
-    for token in trimmed.split_whitespace().skip(1) {
+    // Match "cokacdir", "cokacdir.exe", or full path ending with cokacdir/cokacdir.exe
+    // Handle quoted paths (e.g. "/path with spaces/cokacdir" --sendfile ...)
+    let (first_token, rest) = if trimmed.starts_with('"') {
+        match trimmed[1..].find('"') {
+            Some(end) => (&trimmed[1..end + 1], trimmed[end + 2..].trim_start()),
+            None => return None,
+        }
+    } else if trimmed.starts_with('\'') {
+        match trimmed[1..].find('\'') {
+            Some(end) => (&trimmed[1..end + 1], trimmed[end + 2..].trim_start()),
+            None => return None,
+        }
+    } else {
+        let token = trimmed.split_whitespace().next().unwrap_or("");
+        (token, trimmed[token.len()..].trim_start())
+    };
+    // Support both backslash and forward-slash paths for basename extraction
+    let basename = first_token.rsplit(['/', '\\']).next().unwrap_or("");
+    if basename != "cokacdir" && basename != "cokacdir.exe" {
+        return None;
+    }
+    // Extract the first --xxx flag after the executable name
+    for token in rest.split_whitespace() {
         if let Some(flag) = token.strip_prefix("--") {
             return Some(flag.to_string());
         }
@@ -3826,7 +3886,7 @@ async fn execute_schedule(
     } else {
         user_prompt.clone()
     };
-    let project_path = entry.current_path.clone();
+    let project_path = crate::utils::format::to_shell_path(&entry.current_path);
     let schedule_id = entry.id.clone();
 
     // Delete schedule files before execution for one-time schedules (absolute / cron --once)
@@ -3839,9 +3899,22 @@ async fn execute_schedule(
     println!("  [{ts}] ⏰ Schedule Starting: {user_prompt}");
 
     // Create persistent workspace directory for this schedule execution
-    let workspace_dir = dirs::home_dir()
-        .map(|h| h.join(".cokacdir").join("workspace").join(&schedule_id))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp").join("cokacdir-workspace").join(&schedule_id));
+    let Some(home) = dirs::home_dir() else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] ⚠ [Schedule] Failed to get home directory");
+        let mut data = state.lock().await;
+        if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+            set.remove(&schedule_id);
+        }
+        data.cancel_tokens.remove(&chat_id);
+        if let Some(prev) = prev_session {
+            data.sessions.insert(chat_id, prev);
+        } else {
+            data.sessions.remove(&chat_id);
+        }
+        return;
+    };
+    let workspace_dir = home.join(".cokacdir").join("workspace").join(&schedule_id);
     sched_debug(&format!("[execute_schedule] id={}, creating workspace: {}", schedule_id, workspace_dir.display()));
     if let Err(e) = fs::create_dir_all(&workspace_dir) {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3916,9 +3989,10 @@ async fn execute_schedule(
              Your current working directory is a dedicated workspace for this schedule.\n\
              This workspace will be preserved after execution. The user can continue work here via /start.\n\
              To work with project files, use absolute paths to the project directory.\n\
-             Any files you want to deliver must be sent via the cokacdir --sendfile command before the task ends."
+             Any files you want to deliver must be sent via the \"{}\" --sendfile command before the task ends.",
+            shell_bin_path()
         ),
-        &workspace_path, chat_id.0, &bot_key, &disabled_notice,
+        &crate::utils::format::to_shell_path(&workspace_path), chat_id.0, &bot_key, &disabled_notice,
         None, // scheduled tasks don't need to register further schedules with session context
     );
 
@@ -4136,6 +4210,8 @@ async fn execute_schedule(
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
                 }
             }
 

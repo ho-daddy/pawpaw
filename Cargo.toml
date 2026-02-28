@@ -21,7 +21,6 @@ dirs = "5"
 unicode-width = "0.2"
 textwrap = "0.16"
 image = "0.25"
-libc = "0.2"
 regex = "1"
 rand = "0.8"
 supports-color = "3"
@@ -42,6 +41,9 @@ async-trait = "0.1"
 ratatui-image = { version = "2.0", default-features = false, features = ["rustix", "image-defaults", "crossterm"] }
 teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

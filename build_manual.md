@@ -1,6 +1,6 @@
 # COKACDIR Rust Build System 사용 설명서
 
-Linux 및 macOS용 크로스 컴파일을 지원하는 Python 기반 빌드 시스템입니다.
+Linux, macOS 및 Windows용 크로스 컴파일을 지원하는 Python 기반 빌드 시스템입니다.
 모든 빌드 도구는 `builder/tools/` 폴더에 로컬 설치되어 시스템 환경을 오염시키지 않습니다.
 
 ## 요구 사항
@@ -17,6 +17,9 @@ python3 build.py
 
 # macOS용 크로스 컴파일
 python3 build.py --macos
+
+# Windows용 크로스 컴파일
+python3 build.py --windows
 
 # 모든 플랫폼용 빌드
 python3 build.py --all
@@ -43,7 +46,10 @@ python3 build.py --all
 | `--linux` | Linux 양쪽 아키텍처 (arm64 + x86_64) |
 | `--linux-arm64` | Linux ARM64 |
 | `--linux-x86_64` | Linux x86_64 |
-| `--all` | 모든 지원 플랫폼 |
+| `--windows` | Windows 양쪽 아키텍처 (x86_64 + arm64) |
+| `--windows-x86_64` | Windows x86_64 |
+| `--windows-arm64` | Windows ARM64 |
+| `--all` | 모든 지원 플랫폼 (Windows 제외, `--all --windows`로 포함 가능) |
 
 ### 설정 옵션
 
@@ -52,6 +58,7 @@ python3 build.py --all
 | `--setup` | 모든 빌드 도구 설치 (Rust, Zig, cargo-zigbuild, macOS SDK) |
 | `--setup-rust` | Rust 툴체인만 설치 |
 | `--setup-cross` | 크로스 컴파일 도구만 설치 (Zig, cargo-zigbuild, macOS SDK) |
+| `--setup-windows` | Windows 크로스 컴파일 도구만 설치 (cargo-xwin) |
 | `--status` | 설치된 도구 상태 확인 |
 
 ### 기타 옵션
@@ -81,6 +88,11 @@ python3 build.py --status
 ✓ Zig: /path/to/builder/tools/zig-0.13.0/zig
 ✓ cargo-zigbuild: Installed
 ✓ macOS SDK: /path/to/builder/tools/MacOSX14.0.sdk
+✓ cargo-xwin: Installed
+✓ clang: Installed
+✓ lld: Installed
+✓ llvm-lib: Installed
+✓ clang-cl: Installed
 ```
 
 ### 2. 모든 도구 설치
@@ -112,20 +124,33 @@ python3 build.py --macos-arm64
 python3 build.py --macos-x86_64
 ```
 
-### 5. 모든 플랫폼 빌드
+### 5. Windows용 크로스 컴파일
+
+```bash
+# x86_64 + ARM64 모두
+python3 build.py --windows
+
+# x86_64만
+python3 build.py --windows-x86_64
+
+# ARM64만
+python3 build.py --windows-arm64
+```
+
+### 6. 모든 플랫폼 빌드
 
 ```bash
 python3 build.py --all
 ```
 
-### 6. 클린 빌드
+### 7. 클린 빌드
 
 ```bash
 # 클린 후 모든 플랫폼 빌드
 python3 build.py --clean --all
 ```
 
-### 7. 릴리스 빌드 (최적화)
+### 8. 릴리스 빌드 (최적화)
 
 ```bash
 python3 build.py --release --all
@@ -141,6 +166,8 @@ python3 build.py --release --all
 | `cokacdir-linux-x86_64` | Linux x86_64 |
 | `cokacdir-macos-aarch64` | macOS Apple Silicon (M1/M2/M3/M4) |
 | `cokacdir-macos-x86_64` | macOS Intel |
+| `cokacdir-windows-x86_64.exe` | Windows x86_64 |
+| `cokacdir-windows-aarch64.exe` | Windows ARM64 |
 
 ## 설치되는 도구
 
@@ -152,6 +179,11 @@ python3 build.py --release --all
 | Zig | 크로스 컴파일용 C/C++ 툴체인 | ~40MB |
 | cargo-zigbuild | Zig를 사용한 Rust 크로스 컴파일 | ~4MB |
 | macOS SDK | macOS 크로스 컴파일용 SDK | ~70MB |
+| cargo-xwin | Windows MSVC 크로스 컴파일 | ~4MB |
+| clang (시스템) | Windows 크로스 컴파일용 C 컴파일러 | 시스템 패키지 |
+| clang-cl (시스템) | Windows ARM64 크로스 컴파일용 MSVC 호환 드라이버 | 시스템 패키지 |
+| lld (시스템) | Windows 크로스 컴파일용 LLVM 링커 | 시스템 패키지 |
+| llvm-lib (시스템) | Windows 크로스 컴파일용 라이브러리 매니저 | 시스템 패키지 |
 
 ## 폴더 구조
 
@@ -174,7 +206,9 @@ project/
     ├── cokacdir-linux-aarch64
     ├── cokacdir-linux-x86_64
     ├── cokacdir-macos-aarch64
-    └── cokacdir-macos-x86_64
+    ├── cokacdir-macos-x86_64
+    ├── cokacdir-windows-x86_64.exe
+    └── cokacdir-windows-aarch64.exe
 ```
 
 ## 문제 해결
@@ -234,3 +268,28 @@ python3 build.py --clean
 - Linux ARM64 (`aarch64-unknown-linux-gnu`)
 - macOS x86_64 (`x86_64-apple-darwin`)
 - macOS ARM64 (`aarch64-apple-darwin`)
+- Windows x86_64 (`x86_64-pc-windows-msvc`)
+- Windows ARM64 (`aarch64-pc-windows-msvc`)
+
+### Windows 크로스 컴파일 요구사항
+Windows 타겟 빌드에는 다음이 필요합니다:
+- **cargo-xwin**: `cargo install cargo-xwin` 또는 `python3 build.py --setup-windows` (자동 설치)
+- **clang**: `apt install clang` (Ubuntu/Debian) 또는 해당 패키지 매니저
+- **clang-cl**: `apt install clang-tools-18` (Ubuntu/Debian) — Windows ARM64 빌드에 필요
+- **lld**: `apt install lld` (Ubuntu/Debian) 또는 해당 패키지 매니저
+- **llvm-lib**: `apt install llvm` (Ubuntu/Debian) 또는 해당 패키지 매니저
+
+Ubuntu에서 LLVM 도구는 버전 접미사(예: `llvm-lib-18`)로 설치되므로, 버전 없는 심볼릭 링크가 필요합니다:
+```bash
+sudo ln -s llvm-lib-18 /usr/bin/llvm-lib
+sudo ln -s llvm-dlltool-18 /usr/bin/llvm-dlltool
+sudo ln -s llvm-rc-18 /usr/bin/llvm-rc
+sudo ln -s clang-cl-18 /usr/bin/clang-cl
+```
+
+또는 `sudo ./install_windows_build_deps.sh` 스크립트로 한 번에 설치할 수 있습니다.
+
+cargo-xwin은 Microsoft의 CRT/SDK 헤더를 자동으로 다운로드하여 MSVC 타겟 크로스 컴파일을 지원합니다.
+첫 빌드 시 CRT/SDK 다운로드에 시간이 걸릴 수 있으며, 인터넷 연결이 필요합니다.
+
+> **참고**: `--all` 옵션은 Windows 타겟을 포함하지 않습니다. Windows 빌드는 `--windows` 또는 `--all --windows`로 명시적으로 지정해야 합니다.
