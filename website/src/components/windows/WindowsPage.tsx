@@ -179,8 +179,8 @@ function WindowsPageInner() {
             </h1>
             <p className="text-lg text-zinc-400 leading-relaxed max-w-2xl mx-auto">
               {t(
-                'Install cokacdir on a Windows PC with Claude Code and use it anywhere via Telegram bot.',
-                'Claude Code가 설치된 Windows PC에 cokacdir을 설치하고, 텔레그램 봇으로 어디서나 사용하는 가이드입니다.'
+                'Install cokacdir on a Windows PC with Claude Code or Codex CLI and use it anywhere via Telegram bot.',
+                'Claude Code 또는 Codex CLI가 설치된 Windows PC에 cokacdir을 설치하고, 텔레그램 봇으로 어디서나 사용하는 가이드입니다.'
               )}
             </p>
           </div>
@@ -266,34 +266,70 @@ function WindowsPageInner() {
             </p>
           </SectionCard>
 
-          {/* Step 3: Install Claude Code */}
-          <SectionCard icon={Terminal} title={t('Install Claude Code', 'Claude Code 설치')} step={3}>
-            <div className="p-4 rounded-lg border border-zinc-700 bg-zinc-800/30">
-              <p className="text-sm text-zinc-400">
+          {/* Step 3: Install AI Provider */}
+          <SectionCard icon={Terminal} title={t('Install AI Provider', 'AI 제공자 설치')} step={3}>
+            <div className="p-4 rounded-lg border border-accent-cyan/20 bg-accent-cyan/5">
+              <p className="text-sm text-zinc-300">
                 {t(
-                  <>If Claude Code is already installed, you can <strong className="text-white">skip this step</strong>.</>,
-                  <>Claude Code가 이미 설치되어 있다면 <strong className="text-white">이 단계를 건너뛸 수 있습니다</strong>.</>
+                  <>cokacdir supports <strong className="text-white">Claude Code</strong> and <strong className="text-white">Codex CLI</strong>. Install at least one. You can also install both.</>,
+                  <>cokacdir은 <strong className="text-white">Claude Code</strong>와 <strong className="text-white">Codex CLI</strong>를 지원합니다. 최소 하나를 설치하세요. 둘 다 설치해도 됩니다.</>
                 )}
               </p>
             </div>
-            <p>
-              {t(
-                'Open PowerShell and run the following command to install Claude Code.',
-                'PowerShell을 열고 아래 명령어를 실행하여 Claude Code를 설치합니다.'
-              )}
-            </p>
-            <CopyBlock code={`irm https://claude.ai/install.ps1 | iex`} label="PowerShell" />
-            <p>
-              {t(
-                <>After installation, add Claude Code to your PATH so it can be run from any location.</>,
-                <>설치 후 Claude Code를 PATH에 추가하여 어디서든 실행할 수 있도록 합니다.</>
-              )}
-            </p>
-            <CopyBlock code={`[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\\.local\\bin", "User")`} label="PowerShell" />
+
+            {/* Claude Code */}
+            <div className="mt-6 p-5 rounded-xl border border-zinc-700 bg-zinc-800/20">
+              <h4 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-accent-purple/20 text-accent-purple text-xs font-bold">A</span>
+                Claude Code
+              </h4>
+              <p className="text-sm text-zinc-300">
+                {t(
+                  'Open PowerShell and run the following command.',
+                  'PowerShell을 열고 아래 명령어를 실행합니다.'
+                )}
+              </p>
+              <CopyBlock code={`irm https://claude.ai/install.ps1 | iex`} label="PowerShell" />
+              <p className="text-sm text-zinc-300">
+                {t(
+                  'Add Claude Code to your PATH.',
+                  'Claude Code를 PATH에 추가합니다.'
+                )}
+              </p>
+              <CopyBlock code={`[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\\.local\\bin", "User")`} label="PowerShell" />
+            </div>
+
+            {/* Codex CLI */}
+            <div className="mt-4 p-5 rounded-xl border border-zinc-700 bg-zinc-800/20">
+              <h4 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-accent-green/20 text-accent-green text-xs font-bold">B</span>
+                Codex CLI
+              </h4>
+              <InlineStep n={1}>
+                {t(
+                  <>Install Node.js from <a href="https://nodejs.org/ko/download" target="_blank" rel="noopener noreferrer" className="text-accent-cyan hover:underline font-medium">nodejs.org/download</a>. Download and run the installer for your system.</>,
+                  <><a href="https://nodejs.org/ko/download" target="_blank" rel="noopener noreferrer" className="text-accent-cyan hover:underline font-medium">nodejs.org/download</a>에서 Node.js를 다운로드하여 설치합니다.</>
+                )}
+              </InlineStep>
+              <InlineStep n={2}>
+                {t(
+                  'Open PowerShell and set the execution policy.',
+                  'PowerShell을 열고 실행 정책을 설정합니다.'
+                )}
+              </InlineStep>
+              <CopyBlock code={`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`} label="PowerShell" />
+              <InlineStep n={3}>
+                {t(
+                  'Install Codex CLI globally.',
+                  'Codex CLI를 전역으로 설치합니다.'
+                )}
+              </InlineStep>
+              <CopyBlock code={`npm i -g @openai/codex`} label="PowerShell" />
+            </div>
           </SectionCard>
 
-          {/* Step 4: Log in to Claude Code */}
-          <SectionCard icon={LogIn} title={t('Log in to Claude Code', 'Claude Code 로그인')} step={4}>
+          {/* Step 4: Log in to AI Provider */}
+          <SectionCard icon={LogIn} title={t('Log in to AI Provider', 'AI 제공자 로그인')} step={4}>
             <div className="p-4 rounded-lg border border-zinc-700 bg-zinc-800/30">
               <p className="text-sm text-zinc-400">
                 {t(
@@ -302,13 +338,32 @@ function WindowsPageInner() {
                 )}
               </p>
             </div>
+
             <p>
               {t(
-                <>Close and reopen PowerShell, then run the <code className="px-1.5 py-0.5 bg-bg-elevated rounded text-accent-cyan text-sm">claude</code> command to log in.</>,
-                <>PowerShell을 닫고 다시 열어서 <code className="px-1.5 py-0.5 bg-bg-elevated rounded text-accent-cyan text-sm">claude</code> 명령어를 실행하여 로그인합니다.</>
+                'Close and reopen PowerShell, then run the login command for the provider you installed.',
+                'PowerShell을 닫고 다시 열어서, 설치한 제공자의 로그인 명령어를 실행합니다.'
               )}
             </p>
-            <CopyBlock code="claude" label="PowerShell" />
+
+            {/* Claude Code */}
+            <div className="mt-4 p-5 rounded-xl border border-zinc-700 bg-zinc-800/20">
+              <h4 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-accent-purple/20 text-accent-purple text-xs font-bold">A</span>
+                Claude Code
+              </h4>
+              <CopyBlock code="claude" label="PowerShell" />
+            </div>
+
+            {/* Codex CLI */}
+            <div className="mt-4 p-5 rounded-xl border border-zinc-700 bg-zinc-800/20">
+              <h4 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-accent-green/20 text-accent-green text-xs font-bold">B</span>
+                Codex CLI
+              </h4>
+              <CopyBlock code="codex" label="PowerShell" />
+            </div>
+
             <p className="text-zinc-500 text-sm">
               {t(
                 'Follow the on-screen instructions to complete the login process.',
