@@ -59,8 +59,6 @@ struct ChatSession {
     /// File upload records not yet sent to Claude AI.
     /// Drained and prepended to the next user prompt so Claude knows about uploaded files.
     pending_uploads: Vec<String>,
-    /// Set to true by /clear to prevent a racing polling loop from re-populating history.
-    cleared: bool,
 }
 
 /// Bot-level settings persisted to disk
@@ -1100,7 +1098,6 @@ async fn handle_message(
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
-                        cleared: false,
                     });
                     session.current_path = Some(last_path.clone());
                     if let Some((session_data, _)) = existing {
@@ -1155,10 +1152,20 @@ async fn handle_message(
         handle_public_command(&bot, chat_id, &text, &state, token, is_group_chat, is_owner).await?;
     } else if text.starts_with("/availabletools") {
         println!("  [{timestamp}] ◀ [{user_name}] /availabletools");
-        handle_availabletools_command(&bot, chat_id, &state).await?;
+        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
+        if is_codex {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        } else {
+            handle_availabletools_command(&bot, chat_id, &state).await?;
+        }
     } else if text.starts_with("/allowedtools") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowedtools");
-        handle_allowedtools_command(&bot, chat_id, &state).await?;
+        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
+        if is_codex {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        } else {
+            handle_allowedtools_command(&bot, chat_id, &state).await?;
+        }
     } else if text.starts_with("/setpollingtime") {
         println!("  [{timestamp}] ◀ [{user_name}] /setpollingtime {}", text.strip_prefix("/setpollingtime").unwrap_or("").trim());
         handle_setpollingtime_command(&bot, chat_id, &text, &state).await?;
@@ -1173,7 +1180,12 @@ async fn handle_message(
         handle_silent_command(&bot, chat_id, &state, token).await?;
     } else if text.starts_with("/allowed") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
-        handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
+        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
+        if is_codex {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        } else {
+            handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
+        }
     } else if text.starts_with('/') && is_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
         let workspace_id = text[1..].split_whitespace().next().unwrap();
         println!("  [{timestamp}] ◀ [{user_name}] /{workspace_id}");
@@ -1431,7 +1443,6 @@ async fn handle_start_command(
             current_path: None,
             history: Vec::new(),
             pending_uploads: Vec::new(),
-            cleared: false,
         });
 
         if let Some((session_data, _)) = &existing {
@@ -2090,7 +2101,6 @@ async fn handle_workspace_resume(
             current_path: None,
             history: Vec::new(),
             pending_uploads: Vec::new(),
-            cleared: false,
         });
 
         if let Some((session_data, _)) = &existing {
@@ -2141,36 +2151,25 @@ async fn handle_clear_command(
     chat_id: ChatId,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    // Cancel in-progress AI request if any
-    let cancel_token = {
-        let data = state.lock().await;
-        data.cancel_tokens.get(&chat_id).cloned()
-    };
-    if let Some(token) = cancel_token {
-        token.cancelled.store(true, Ordering::Relaxed);
-        if let Ok(guard) = token.child_pid.lock() {
-            if let Some(pid) = *guard {
-                #[cfg(unix)]
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
-                #[cfg(windows)]
-                { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
-            }
-        }
-    }
-
-    let current_path = {
+    let (current_path, provider, orphan_stop_msg) = {
         let mut data = state.lock().await;
         let path = data.sessions.get(&chat_id).and_then(|s| s.current_path.clone());
         if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.session_id = None;
             session.history.clear();
             session.pending_uploads.clear();
-            session.cleared = true;
         }
-        data.cancel_tokens.remove(&chat_id);
-        data.stop_message_ids.remove(&chat_id);
-        path
+        let mdl = get_model(&data.settings, chat_id);
+        let prov = if codex::is_codex_model(mdl.as_deref()) { "codex" } else { "claude" };
+        let stop_msg = data.stop_message_ids.remove(&chat_id);
+        (path, prov.to_string(), stop_msg)
     };
+
+    // Delete orphaned "Stopping..." message if /stop raced with completion
+    if let Some(msg_id) = orphan_stop_msg {
+        shared_rate_limit_wait(state, chat_id).await;
+        let _ = tg!("delete_message", bot.delete_message(chat_id, msg_id).await);
+    }
 
     // Delete session file from disk so session_id is completely forgotten
     if let Some(ref path) = current_path {
@@ -2181,7 +2180,9 @@ async fn handle_clear_command(
                     if file_path.extension().map(|e| e == "json").unwrap_or(false) {
                         if let Ok(content) = fs::read_to_string(&file_path) {
                             if let Ok(session_data) = serde_json::from_str::<SessionData>(&content) {
-                                if session_data.current_path == *path {
+                                if session_data.current_path == *path
+                                    && (session_data.provider.is_empty() || session_data.provider == provider)
+                                {
                                     let _ = fs::remove_file(&file_path);
                                 }
                             }
@@ -2254,10 +2255,19 @@ async fn handle_stop_command(
             shared_rate_limit_wait(state, chat_id).await;
             let stop_msg = tg!("send_message", bot.send_message(chat_id, "Stopping...").await)?;
 
-            // Store the stop message ID so the polling loop can update it later
+            // Store the stop message ID only if the task is still running.
+            // If cancel_token was already removed (task finished during "Stopping..." send),
+            // delete the orphaned message immediately instead of inserting.
             {
                 let mut data = state.lock().await;
-                data.stop_message_ids.insert(chat_id, stop_msg.id);
+                if data.cancel_tokens.contains_key(&chat_id) {
+                    data.stop_message_ids.insert(chat_id, stop_msg.id);
+                } else {
+                    drop(data);
+                    shared_rate_limit_wait(state, chat_id).await;
+                    let _ = tg!("delete_message", bot.delete_message(chat_id, stop_msg.id).await);
+                    return Ok(());
+                }
             }
 
             // Set cancellation flag
@@ -3263,10 +3273,7 @@ async fn handle_text_message(
             .unwrap_or_default();
         // Drain pending uploads so they are sent to Claude exactly once
         let uploads = data.sessions.get_mut(&chat_id)
-            .map(|s| {
-                s.cleared = false; // Reset cleared flag on new message
-                std::mem::take(&mut s.pending_uploads)
-            })
+            .map(|s| std::mem::take(&mut s.pending_uploads))
             .unwrap_or_default();
         msg_debug(&format!("[handle_text_message] session_id={:?}, current_path={:?}, model={:?}, uploads={}, history_len={}",
             info.as_ref().map(|(sid, _)| sid), info.as_ref().map(|(_, p)| p), mdl, uploads.len(), hist.len()));
@@ -3667,24 +3674,22 @@ async fn handle_text_message(
                 {
                     let mut data = state_owned.lock().await;
                     if let Some(session) = data.sessions.get_mut(&chat_id) {
-                        if !session.cleared {
-                            msg_debug(&format!("[polling] saving session: new_session_id={:?}, old_session_id={:?}, history_len={}",
-                                new_session_id, session.session_id, session.history.len()));
-                            if let Some(sid) = new_session_id.take() {
-                                session.session_id = Some(sid);
-                            }
-                            session.history.push(HistoryItem {
-                                item_type: HistoryType::User,
-                                content: user_text_owned.clone(),
-                            });
-                            session.history.push(HistoryItem {
-                                item_type: HistoryType::Assistant,
-                                content: final_response,
-                            });
-                            save_session_to_file(session, &current_path, provider_str);
-                            msg_debug(&format!("[polling] session saved: session_id={:?}, history_len={}",
-                                session.session_id, session.history.len()));
+                        msg_debug(&format!("[polling] saving session: new_session_id={:?}, old_session_id={:?}, history_len={}",
+                            new_session_id, session.session_id, session.history.len()));
+                        if let Some(sid) = new_session_id.take() {
+                            session.session_id = Some(sid);
                         }
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::User,
+                            content: user_text_owned.clone(),
+                        });
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::Assistant,
+                            content: final_response,
+                        });
+                        save_session_to_file(session, &current_path, provider_str);
+                        msg_debug(&format!("[polling] session saved: session_id={:?}, history_len={}",
+                            session.session_id, session.history.len()));
                     }
                 }
 
@@ -3774,40 +3779,35 @@ async fn handle_text_message(
 
             let mut data = state_owned.lock().await;
             if let Some(session) = data.sessions.get_mut(&chat_id) {
-                if !session.cleared {
-                    if let Some(sid) = new_session_id {
-                        session.session_id = Some(sid);
-                    }
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned,
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: stopped_response,
-                    });
-                    save_session_to_file(session, &current_path, provider_str);
+                if let Some(sid) = new_session_id {
+                    session.session_id = Some(sid);
                 }
+                session.history.push(HistoryItem {
+                    item_type: HistoryType::User,
+                    content: user_text_owned,
+                });
+                session.history.push(HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: stopped_response,
+                });
+                save_session_to_file(session, &current_path, provider_str);
             }
             data.cancel_tokens.remove(&chat_id);
             data.stop_message_ids.remove(&chat_id);
             return;
         }
 
-        // Clean up "Stopping..." message if /stop was sent during queue drain
-        {
+        // Atomically remove both cancel_tokens and stop_message_ids to prevent
+        // race with /stop handler inserting a stop_msg_id between two separate locks
+        let orphan_stop_msg = {
             let mut data = state_owned.lock().await;
-            if let Some(msg_id) = data.stop_message_ids.remove(&chat_id) {
-                drop(data);
-                shared_rate_limit_wait(&state_owned, chat_id).await;
-                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
-            }
-        }
-
-        // Release lock: allow new messages for this chat
-        {
-            let mut data = state_owned.lock().await;
+            let msg_id = data.stop_message_ids.remove(&chat_id);
             data.cancel_tokens.remove(&chat_id);
+            msg_id
+        };
+        if let Some(msg_id) = orphan_stop_msg {
+            shared_rate_limit_wait(&state_owned, chat_id).await;
+            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
         }
     });
 
@@ -4321,6 +4321,8 @@ fn find_closing_single(chars: &[char], start: usize, marker: char) -> Option<usi
 /// Check if a Bash tool call is an internal cokacdir command.
 /// Scans whitespace-delimited tokens for one whose basename matches the cokacdir binary.
 /// Handles quoted paths, shell wrappers (bash -lc "..."), chained commands (cd && ...), etc.
+/// NOTE: Returns bool (not subcommand name), so console logs show "cokacdir: ..." without
+/// the specific --flag. format_cokacdir_result() auto-detects subcommand from JSON fields instead.
 fn detect_cokacdir_command(name: &str, input: &str) -> bool {
     if name != "Bash" { return false; }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else { return false };
@@ -4351,6 +4353,10 @@ fn read_latest_cron_result() -> Option<String> {
 
 /// Format a cokacdir command's JSON result into a human-readable message.
 /// Auto-detects the subcommand from JSON result fields.
+/// NOTE: Empty content triggers .result file read (for --cron async results).
+/// Currently only --cron produces empty output, so this is safe.
+/// If a new subcommand also returns empty output in the future,
+/// it would incorrectly read a stale cron .result file.
 fn format_cokacdir_result(content: &str) -> String {
     // Try to parse as JSON; if empty, try reading from .result file (for --cron)
     let effective_content = if content.trim().is_empty() {
@@ -5196,7 +5202,6 @@ async fn execute_schedule(
                 current_path: Some(workspace_path_owned.clone()),
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
-                cleared: false,
             };
             // Add user prompt and AI response to history for session continuity
             sched_session.history.push(HistoryItem {
@@ -5341,7 +5346,6 @@ async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
                             current_path: Some(entry.current_path.clone()),
                             history: Vec::new(),
                             pending_uploads: Vec::new(),
-                            cleared: false,
                         });
                         data.pending_schedules.entry(chat_id).or_default().insert(entry.id.clone());
                         // Pre-insert cancel_token to prevent race with incoming user messages

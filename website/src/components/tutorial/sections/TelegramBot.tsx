@@ -540,6 +540,11 @@ export default function TelegramBot() {
             기본적으로 17개의 도구가 활성화되어 있으며, 필요에 따라 조정할 수 있습니다.
           </p>
 
+          <TipBox variant="warning">
+            이 명령어들은 <strong>Claude 모델 전용</strong>입니다. Codex 모델에는 도구 권한 개념이 없으므로,
+            Codex 모드에서 실행하면 "Tool permissions are not supported in Codex mode." 메시지가 표시됩니다.
+          </TipBox>
+
           <div className="space-y-3 mb-6">
             {/* /availabletools */}
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
@@ -1388,6 +1393,11 @@ export default function TelegramBot() {
             You can view and dynamically add or remove the tools available to the AI.
             By default, 17 tools are enabled. Adjust them as needed for your workflow or security requirements.
           </p>
+
+          <TipBox variant="warning">
+            These commands are <strong>Claude-only</strong>. Codex models do not support tool permissions.
+            Running these commands in Codex mode will display: "Tool permissions are not supported in Codex mode."
+          </TipBox>
 
           <div className="space-y-3 mb-6">
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">

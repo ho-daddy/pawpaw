@@ -204,8 +204,8 @@ function useScenarios(): Scenario[] {
       icon: ShieldCheck,
       label: 'Tool Permissions',
       labelKo: '권한 관리',
-      description: 'Dynamically control what the AI can do. Use /allowed +tool to enable and /allowed -tool to disable. Check available tools with /availabletools and current permissions with /allowedtools.',
-      descriptionKo: 'AI가 할 수 있는 일을 동적으로 제어하세요. /allowed +tool로 활성화, /allowed -tool로 비활성화. /availabletools로 전체 도구 확인, /allowedtools로 현재 권한 확인.',
+      description: 'Dynamically control what the AI can do. Use /allowed +tool to enable and /allowed -tool to disable. Check available tools with /availabletools and current permissions with /allowedtools. (Claude only — not supported in Codex mode)',
+      descriptionKo: 'AI가 할 수 있는 일을 동적으로 제어하세요. /allowed +tool로 활성화, /allowed -tool로 비활성화. /availabletools로 전체 도구 확인, /allowedtools로 현재 권한 확인. (Claude 전용 — Codex 모드에서는 미지원)',
       keyPoints: [
         { en: '/allowed +tool to enable, -tool to disable', ko: '/allowed +tool로 활성화, -tool로 비활성화' },
         { en: '/availabletools to see all 20 tools', ko: '/availabletools로 전체 20개 도구 확인' },
