@@ -2528,8 +2528,9 @@ pub fn draw(frame: &mut Frame, state: &mut EditorState, area: Rect, theme: &Them
 
             let (match_info, match_info_style) = if let Some(ref err) = state.find_error {
                 // 정규식 에러 표시 (빨간색)
-                let truncated = if err.len() > 30 {
-                    format!(" {}... ", &err[..27])
+                let truncated = if err.chars().count() > 30 {
+                    let t: String = err.chars().take(27).collect();
+                    format!(" {}... ", t)
                 } else {
                     format!(" {} ", err)
                 };

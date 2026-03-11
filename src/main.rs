@@ -78,6 +78,8 @@ fn print_help() {
     println!("                            Remove a schedule");
     println!("    --cron-update <SID> --at <TIME> --chat <ID> --key <HASH>");
     println!("                            Update schedule time");
+    println!("    --message <TEXT> --to <BOT> --chat <ID> --key <HASH>");
+    println!("                            Send message to another bot (internal use)");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -153,6 +155,10 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
 
 fn cron_debug(msg: &str) {
     claude::debug_log_to("cron.log", msg);
+}
+
+fn msg_debug(msg: &str) {
+    claude::debug_log_to("msg.log", msg);
 }
 
 fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &str, once: bool, session_id: Option<&str>) {
@@ -479,6 +485,89 @@ fn handle_cron_update(id: &str, at_value: &str, chat_id: i64, hash_key: &str) {
 
     cron_debug(&format!("[handle_cron_update] id={}, updated successfully", id));
     println!("{}", serde_json::json!({"status":"ok","id":id,"schedule":schedule_value}));
+}
+
+fn handle_bot_message(content: &str, to: &str, chat_id: i64, hash_key: &str) {
+    use services::telegram;
+
+    msg_debug("========================================");
+    msg_debug(&format!("[handle_bot_message] START: to={}, chat_id={}, hash_key={}, content_len={}", to, chat_id, hash_key, content.len()));
+
+    // 1. Verify sender: resolve username from --key
+    msg_debug(&format!("[handle_bot_message] resolving sender from hash_key={}", hash_key));
+    let from_username = match telegram::resolve_username_by_hash(hash_key) {
+        Some(u) => {
+            msg_debug(&format!("[handle_bot_message] sender resolved: {}", u));
+            u
+        }
+        None => {
+            msg_debug(&format!("[handle_bot_message] sender resolution failed for hash_key={}", hash_key));
+            eprintln!("{}", serde_json::json!({"status":"error","message":"Invalid key"}));
+            std::process::exit(1);
+        }
+    };
+
+    // 2. Verify receiver: check if --to bot exists
+    let to_clean = to.strip_prefix('@').unwrap_or(to);
+    let to_lower = to_clean.to_lowercase();
+    msg_debug(&format!("[handle_bot_message] checking receiver bot: {}", to_lower));
+    if !telegram::bot_username_exists(&to_lower) {
+        msg_debug(&format!("[handle_bot_message] receiver bot not found: {}", to_lower));
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("Bot '{}' not found", to_lower)}));
+        std::process::exit(1);
+    }
+    msg_debug(&format!("[handle_bot_message] receiver bot confirmed: {}", to_lower));
+
+    // 3. Create messages directory
+    msg_debug("[handle_bot_message] getting messages directory");
+    let msg_dir = match telegram::messages_dir() {
+        Some(d) => {
+            msg_debug(&format!("[handle_bot_message] messages_dir={}", d.display()));
+            d
+        }
+        None => {
+            msg_debug("[handle_bot_message] messages_dir() returned None");
+            eprintln!("{}", serde_json::json!({"status":"error","message":"cannot determine home directory"}));
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&msg_dir) {
+        msg_debug(&format!("[handle_bot_message] create_dir_all failed: {}", e));
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to create messages directory: {}", e)}));
+        std::process::exit(1);
+    }
+    msg_debug("[handle_bot_message] messages directory ready");
+
+    // 4. Generate message file
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+    let random_hex = format!("{:08x}", rand::random::<u32>());
+    let msg_id = format!("msg_{}_{}", timestamp, random_hex);
+    msg_debug(&format!("[handle_bot_message] generated msg_id={}, timestamp={}", msg_id, timestamp));
+
+    let msg_json = serde_json::json!({
+        "id": msg_id,
+        "from": from_username,
+        "to": to_lower,
+        "chat_id": chat_id.to_string(),
+        "content": content,
+        "created_at": now.format("%Y-%m-%d %H:%M:%S").to_string(),
+    });
+
+    let file_path = msg_dir.join(format!("{}.json", msg_id));
+    msg_debug(&format!("[handle_bot_message] writing message file: {}", file_path.display()));
+    match std::fs::write(&file_path, serde_json::to_string_pretty(&msg_json).unwrap_or_default()) {
+        Ok(_) => {
+            msg_debug(&format!("[handle_bot_message] OK: from={}, to={}, id={}, path={}", from_username, to_lower, msg_id, file_path.display()));
+            println!("{}", serde_json::json!({"status":"ok","id":msg_id}));
+        }
+        Err(e) => {
+            msg_debug(&format!("[handle_bot_message] write failed: {}", e));
+            eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to write message file: {}", e)}));
+            std::process::exit(1);
+        }
+    }
+    msg_debug("[handle_bot_message] END");
 }
 
 fn print_version() {
@@ -850,6 +939,72 @@ fn main() -> io::Result<()> {
                     }
                     _ => {
                         eprintln!("{}", serde_json::json!({"status":"error","message":"--sendfile requires <PATH>, --chat <ID>, and --key <HASH>"}));
+                    }
+                }
+                return Ok(());
+            }
+            "--message" => {
+                // Parse: --message <TEXT> --to <BOT> --chat <ID> --key <HASH>
+                msg_debug(&format!("[main:--message] parsing args starting at i={}, remaining_args={}", i, args.len() - i - 1));
+                let mut message: Option<String> = None;
+                let mut to_bot: Option<String> = None;
+                let mut chat_id: Option<i64> = None;
+                let mut key: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    msg_debug(&format!("[main:--message] arg[{}]={:?}", j, args[j]));
+                    match args[j].as_str() {
+                        "--to" => {
+                            if j + 1 < args.len() {
+                                to_bot = Some(args[j + 1].clone());
+                                msg_debug(&format!("[main:--message] --to={}", args[j + 1]));
+                                j += 2;
+                            } else {
+                                msg_debug("[main:--message] --to missing value");
+                                j += 1;
+                            }
+                        }
+                        "--chat" => {
+                            if j + 1 < args.len() {
+                                chat_id = args[j + 1].parse().ok();
+                                msg_debug(&format!("[main:--message] --chat={:?} (parsed={:?})", args[j + 1], chat_id));
+                                j += 2;
+                            } else {
+                                msg_debug("[main:--message] --chat missing value");
+                                j += 1;
+                            }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() {
+                                key = Some(args[j + 1].clone());
+                                msg_debug(&format!("[main:--message] --key={}", args[j + 1]));
+                                j += 2;
+                            } else {
+                                msg_debug("[main:--message] --key missing value");
+                                j += 1;
+                            }
+                        }
+                        _ if message.is_none() && !args[j].starts_with("--") => {
+                            message = Some(args[j].clone());
+                            msg_debug(&format!("[main:--message] message text captured: len={}", args[j].len()));
+                            j += 1;
+                        }
+                        _ => {
+                            msg_debug(&format!("[main:--message] skipping unrecognized arg: {:?}", args[j]));
+                            j += 1;
+                        }
+                    }
+                }
+                msg_debug(&format!("[main:--message] parsed: message={}, to={}, chat_id={}, key={}",
+                    message.is_some(), to_bot.is_some(), chat_id.is_some(), key.is_some()));
+                match (message, to_bot, chat_id, key) {
+                    (Some(msg), Some(to), Some(cid), Some(k)) => {
+                        msg_debug(&format!("[main:--message] calling handle_bot_message: to={}, chat_id={}", to, cid));
+                        handle_bot_message(&msg, &to, cid, &k);
+                    }
+                    _ => {
+                        msg_debug("[main:--message] incomplete arguments, showing error");
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--message requires <TEXT> --to <BOT> --chat <ID> --key <HASH>"}));
                     }
                 }
                 return Ok(());

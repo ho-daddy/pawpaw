@@ -757,7 +757,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log(&format!("Args count: {}", args.len()));
     for (i, arg) in args.iter().enumerate() {
         if arg.len() > 100 {
-            debug_log(&format!("  arg[{}]: {}... (truncated, {} chars total)", i, &arg[..100], arg.len()));
+            let truncated: String = arg.chars().take(100).collect();
+            debug_log(&format!("  arg[{}]: {}... (truncated, {} chars total)", i, truncated, arg.len()));
         } else {
             debug_log(&format!("  arg[{}]: {}", i, arg));
         }
