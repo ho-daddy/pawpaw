@@ -4530,6 +4530,7 @@ async fn handle_text_message(
             "🕙 Processing",  "🕚 Processing.", "🕛 Processing..",
         ];
         let mut full_response = String::new();
+        let mut ai_text_only = String::new();
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
@@ -4575,6 +4576,7 @@ async fn handle_text_message(
                                 StreamMessage::Text { content } => {
                                     msg_debug(&format!("[polling] Text: {} chars, preview={:?}",
                                         content.len(), truncate_str(&content, 80)));
+                                    ai_text_only.push_str(&content);
                                     full_response.push_str(&content);
                                 }
                                 StreamMessage::ToolUse { name, input } => {
@@ -4643,7 +4645,10 @@ async fn handle_text_message(
                                     msg_debug(&format!("[polling] Done: result_len={}, session_id={:?}",
                                         result.len(), sid));
                                     if !result.is_empty() && full_response.is_empty() {
-                                        full_response = result;
+                                        full_response = result.clone();
+                                    }
+                                    if !result.is_empty() && ai_text_only.is_empty() {
+                                        ai_text_only = result;
                                     }
                                     if let Some(s) = sid {
                                         new_session_id = Some(s);
@@ -4773,7 +4778,6 @@ async fn handle_text_message(
 
                 // Update session state
                 {
-                    let final_response_for_log = final_response.clone();
                     let mut data = state_owned.lock().await;
                     if let Some(session) = data.sessions.get_mut(&chat_id) {
                         msg_debug(&format!("[polling] saving session: new_session_id={:?}, old_session_id={:?}, history_len={}",
@@ -4803,13 +4807,15 @@ async fn handle_text_message(
                             from: Some(user_display_name_owned.clone()),
                             text: user_text_owned.clone(),
                         });
-                        append_group_chat_log(chat_id.0, &GroupChatLogEntry {
-                            ts: now_ts,
-                            bot: bot_username_for_log.clone(),
-                            role: "assistant".to_string(),
-                            from: None,
-                            text: final_response_for_log,
-                        });
+                        if !ai_text_only.is_empty() {
+                            append_group_chat_log(chat_id.0, &GroupChatLogEntry {
+                                ts: now_ts,
+                                bot: bot_username_for_log.clone(),
+                                role: "assistant".to_string(),
+                                from: None,
+                                text: ai_text_only.clone(),
+                            });
+                        }
                     }
                 }
 
@@ -4902,12 +4908,9 @@ async fn handle_text_message(
                 if let Some(sid) = new_session_id {
                     session.session_id = Some(sid);
                 }
-                // Clone for group chat log before moving into history
-                let user_text_for_log = user_text_owned.clone();
-                let response_for_log = stopped_response.clone();
                 session.history.push(HistoryItem {
                     item_type: HistoryType::User,
-                    content: user_text_owned,
+                    content: user_text_owned.clone(),
                 });
                 session.history.push(HistoryItem {
                     item_type: HistoryType::Assistant,
@@ -4915,21 +4918,21 @@ async fn handle_text_message(
                 });
                 save_session_to_file(session, &current_path, provider_str);
                 // Write to group chat shared log (for cross-bot context sharing)
-                if chat_id.0 < 0 {
+                if chat_id.0 < 0 && !ai_text_only.is_empty() {
                     let now_ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                     append_group_chat_log(chat_id.0, &GroupChatLogEntry {
                         ts: now_ts.clone(),
                         bot: bot_username_for_log.clone(),
                         role: "user".to_string(),
                         from: Some(user_display_name_owned.clone()),
-                        text: user_text_for_log,
+                        text: user_text_owned,
                     });
                     append_group_chat_log(chat_id.0, &GroupChatLogEntry {
                         ts: now_ts,
                         bot: bot_username_for_log.clone(),
                         role: "assistant".to_string(),
                         from: None,
-                        text: response_for_log,
+                        text: ai_text_only,
                     });
                 }
             }
@@ -6185,6 +6188,7 @@ async fn execute_schedule(
             "🕙 Processing",  "🕚 Processing.", "🕛 Processing..",
         ];
         let mut full_response = String::new();
+        let mut ai_text_only = String::new();
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
@@ -6223,6 +6227,7 @@ async fn execute_schedule(
                                 exec_session_id = Some(session_id);
                             }
                             StreamMessage::Text { content } => {
+                                ai_text_only.push_str(&content);
                                 full_response.push_str(&content);
                             }
                             StreamMessage::ToolUse { name, input } => {
@@ -6287,7 +6292,10 @@ async fn execute_schedule(
                             }
                             StreamMessage::Done { result, session_id } => {
                                 if !result.is_empty() && full_response.is_empty() {
-                                    full_response = result;
+                                    full_response = result.clone();
+                                }
+                                if !result.is_empty() && ai_text_only.is_empty() {
+                                    ai_text_only = result;
                                 }
                                 if let Some(sid) = session_id {
                                     exec_session_id = Some(sid);
@@ -6499,13 +6507,13 @@ async fn execute_schedule(
                 from: Some("scheduled_task".to_string()),
                 text: entry_clone.prompt.clone(),
             });
-            if !full_response.is_empty() {
+            if !ai_text_only.is_empty() {
                 append_group_chat_log(chat_id.0, &GroupChatLogEntry {
                     ts: now_ts,
                     bot: sched_bot_username.clone(),
                     role: "assistant".to_string(),
                     from: None,
-                    text: full_response.clone(),
+                    text: ai_text_only.clone(),
                 });
             }
         }
@@ -6759,6 +6767,7 @@ async fn process_bot_message(
             "🕙 Processing",  "🕚 Processing.", "🕛 Processing..",
         ];
         let mut full_response = String::new();
+        let mut ai_text_only = String::new();
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
@@ -6802,6 +6811,7 @@ async fn process_bot_message(
                                 }
                                 StreamMessage::Text { content } => {
                                     msg_debug(&format!("[botmsg_poll:{}] Text: chunk_len={}, total_len={}", bmsg_id_for_log, content.len(), full_response.len() + content.len()));
+                                    ai_text_only.push_str(&content);
                                     full_response.push_str(&content);
                                 }
                                 StreamMessage::ToolUse { name, input } => {
@@ -6873,7 +6883,10 @@ async fn process_bot_message(
                                     msg_debug(&format!("[botmsg_poll:{}] Done: result_len={}, session_id={:?}, full_response_len={}",
                                         bmsg_id_for_log, result.len(), sid, full_response.len()));
                                     if !result.is_empty() && full_response.is_empty() {
-                                        full_response = result;
+                                        full_response = result.clone();
+                                    }
+                                    if !result.is_empty() && ai_text_only.is_empty() {
+                                        ai_text_only = result;
                                     }
                                     if let Some(s) = sid {
                                         new_session_id = Some(s);
@@ -7021,13 +7034,15 @@ async fn process_bot_message(
                             from: Some(format!("bot:{}", from_bot_for_log)),
                             text: prompt_owned.clone(),
                         });
-                        append_group_chat_log(chat_id.0, &GroupChatLogEntry {
-                            ts: now_ts,
-                            bot: bot_username_for_log.clone(),
-                            role: "assistant".to_string(),
-                            from: None,
-                            text: final_response.clone(),
-                        });
+                        if !ai_text_only.is_empty() {
+                            append_group_chat_log(chat_id.0, &GroupChatLogEntry {
+                                ts: now_ts,
+                                bot: bot_username_for_log.clone(),
+                                role: "assistant".to_string(),
+                                from: None,
+                                text: ai_text_only.clone(),
+                            });
+                        }
                     }
                 }
 
@@ -7097,11 +7112,9 @@ async fn process_bot_message(
                 if let Some(sid) = new_session_id {
                     session.session_id = Some(sid);
                 }
-                let prompt_for_log = prompt_owned.clone();
-                let response_for_log = stopped_response.clone();
                 session.history.push(HistoryItem {
                     item_type: HistoryType::User,
-                    content: prompt_owned,
+                    content: prompt_owned.clone(),
                 });
                 session.history.push(HistoryItem {
                     item_type: HistoryType::Assistant,
@@ -7109,21 +7122,21 @@ async fn process_bot_message(
                 });
                 save_session_to_file(session, &current_path_owned, provider_str);
                 // Write to group chat shared log (bot-to-bot messages, stopped)
-                if chat_id.0 < 0 {
+                if chat_id.0 < 0 && !ai_text_only.is_empty() {
                     let now_ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                     append_group_chat_log(chat_id.0, &GroupChatLogEntry {
                         ts: now_ts.clone(),
                         bot: bot_username_for_log.clone(),
                         role: "user".to_string(),
                         from: Some(format!("bot:{}", from_bot_for_log)),
-                        text: prompt_for_log,
+                        text: prompt_owned,
                     });
                     append_group_chat_log(chat_id.0, &GroupChatLogEntry {
                         ts: now_ts,
                         bot: bot_username_for_log.clone(),
                         role: "assistant".to_string(),
                         from: None,
-                        text: response_for_log,
+                        text: ai_text_only,
                     });
                 }
             } else {
