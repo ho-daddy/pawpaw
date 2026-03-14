@@ -1832,6 +1832,66 @@ async fn handle_message(
         return Ok(());
     }
 
+    // Handle location sharing — store as pending, deliver with next text message
+    if let Some(location) = msg.location() {
+        msg_debug(&format!("[handle_message] chat_id={}, location: lat={}, lon={}", chat_id.0, location.latitude, location.longitude));
+        auto_restore_session(&state, chat_id, &user_name).await;
+
+        let location_record = format!(
+            "[Location shared] Latitude: {}, Longitude: {}",
+            location.latitude, location.longitude
+        );
+        let stored = {
+            let mut data = state.lock().await;
+            if let Some(session) = data.sessions.get_mut(&chat_id) {
+                session.pending_uploads.push(location_record.clone());
+                true
+            } else {
+                false
+            }
+        };
+        if stored {
+            println!("  [{timestamp}] ◀ [{user_name}] Location: {}, {} (pending)", location.latitude, location.longitude);
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "Location received.").await)?;
+        } else {
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.").await)?;
+        }
+        return Ok(());
+    }
+
+    // Handle venue sharing (place selected from Telegram's location picker) — store as pending
+    if let Some(venue) = msg.venue() {
+        let loc = &venue.location;
+        msg_debug(&format!("[handle_message] chat_id={}, venue: title={:?}, addr={:?}, lat={}, lon={}",
+            chat_id.0, venue.title, venue.address, loc.latitude, loc.longitude));
+        auto_restore_session(&state, chat_id, &user_name).await;
+
+        let location_record = format!(
+            "[Location shared] {}, {} (Latitude: {}, Longitude: {})",
+            venue.title, venue.address, loc.latitude, loc.longitude
+        );
+        let stored = {
+            let mut data = state.lock().await;
+            if let Some(session) = data.sessions.get_mut(&chat_id) {
+                session.pending_uploads.push(location_record.clone());
+                true
+            } else {
+                false
+            }
+        };
+        if stored {
+            println!("  [{timestamp}] ◀ [{user_name}] Venue: {} ({}, {}) (pending)", venue.title, loc.latitude, loc.longitude);
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, format!("Location received: {}", venue.title)).await)?;
+        } else {
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.").await)?;
+        }
+        return Ok(());
+    }
+
     let Some(raw_text) = msg.text() else {
         msg_debug(&format!("[handle_message] chat_id={}, non-text message (no raw_text), skipping", chat_id.0));
         return Ok(());
@@ -1905,6 +1965,15 @@ async fn handle_message(
     // In group chats (with prefix required), ignore plain text (only /, !, ; prefixed messages are processed)
     if require_prefix && !text.starts_with('/') && !text.starts_with('!') && !text.starts_with(';') {
         msg_debug(&format!("[handle_message] chat_id={}, require_prefix=true, ignoring plain text", chat_id.0));
+        // Clear pending uploads — this message was not for this bot,
+        // so any previously shared location/file data should be discarded.
+        let mut data = state.lock().await;
+        if let Some(session) = data.sessions.get_mut(&chat_id) {
+            if !session.pending_uploads.is_empty() {
+                msg_debug(&format!("[handle_message] clearing {} pending_uploads (not addressed to this bot)", session.pending_uploads.len()));
+                session.pending_uploads.clear();
+            }
+        }
         return Ok(());
     }
 
