@@ -28,6 +28,7 @@ fn debug_log(msg: &str) {
         let log_path = debug_dir.join("ai_screen.log");
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
+            .write(true)
             .append(true)
             .open(log_path)
         {

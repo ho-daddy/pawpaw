@@ -129,6 +129,7 @@ pub fn debug_log_to(filename: &str, msg: &str) {
         let log_path = debug_dir.join(filename);
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
+            .write(true)
             .append(true)
             .open(log_path)
         {

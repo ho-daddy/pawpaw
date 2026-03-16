@@ -36,6 +36,7 @@ fn tg_debug<T, E: std::fmt::Display>(name: &str, result: &Result<T, E>) {
     let line = format!("[{ts}] {name}: {status}\n");
     let _ = std::fs::OpenOptions::new()
         .create(true)
+        .write(true)
         .append(true)
         .open(&log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
@@ -114,8 +115,9 @@ fn group_chat_log_path(chat_id: i64) -> Option<std::path::PathBuf> {
     group_chat_log_dir().map(|d| d.join(format!("{}.jsonl", chat_id)))
 }
 
-/// Append an entry to the group chat shared log with exclusive file lock.
-/// Uses fs2 flock to prevent race conditions between concurrent bot processes.
+/// Append an entry to the group chat shared log.
+/// Uses a separate lock file for synchronization to avoid Windows LockFileEx
+/// conflicts when locking and writing on the same file handle.
 fn append_group_chat_log(chat_id: i64, entry: &GroupChatLogEntry) {
     use fs2::FileExt;
 
@@ -123,25 +125,33 @@ fn append_group_chat_log(chat_id: i64, entry: &GroupChatLogEntry) {
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() { return; }
     }
-    let Ok(file) = fs::OpenOptions::new()
+
+    // Serialize before acquiring lock to minimize lock hold time
+    let Ok(json) = serde_json::to_string(entry) else { return };
+    let line = format!("{}\n", json);
+
+    // Lock via a dedicated lock file (not the data file itself)
+    // On Windows, LockFileEx is mandatory and can conflict with WriteFile on the same handle
+    let lock_path = path.with_extension("jsonl.lock");
+    let Ok(lock_file) = fs::OpenOptions::new()
         .create(true)
+        .write(true)
+        .open(&lock_path) else { return };
+    if lock_file.lock_exclusive().is_err() { return; }
+
+    // Write to data file without locking it
+    if let Ok(mut data_file) = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
         .append(true)
-        .open(&path) else { return };
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = data_file.write_all(line.as_bytes());
+        let _ = data_file.sync_data();
+    }
 
-    // Acquire exclusive lock — blocks until all other readers/writers release
-    if file.lock_exclusive().is_err() { return; }
-
-    let Ok(json) = serde_json::to_string(entry) else {
-        let _ = file.unlock();
-        return;
-    };
-    use std::io::Write;
-    let mut writer = std::io::BufWriter::new(&file);
-    let _ = writeln!(writer, "{}", json);
-    // flush before unlock to ensure data is written
-    let _ = writer.flush();
-
-    let _ = file.unlock();
+    let _ = lock_file.unlock();
 }
 
 /// Read entries from the group chat log within a specific line range (1-based).
@@ -158,9 +168,19 @@ pub fn read_group_chat_log_range(
     let filter_bot = filter_bot_owned.as_deref();
 
     let Some(path) = group_chat_log_path(chat_id) else { return Vec::new() };
-    let Ok(file) = fs::File::open(&path) else { return Vec::new() };
 
-    if file.lock_shared().is_err() { return Vec::new(); }
+    // Use the same dedicated lock file as append_group_chat_log for coordination
+    let lock_path = path.with_extension("jsonl.lock");
+    let Ok(lock_file) = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path) else { return Vec::new() };
+    if lock_file.lock_shared().is_err() { return Vec::new(); }
+
+    let Ok(file) = fs::File::open(&path) else {
+        let _ = lock_file.unlock();
+        return Vec::new();
+    };
 
     let reader = std::io::BufReader::new(&file);
     use std::io::BufRead;
@@ -201,7 +221,7 @@ pub fn read_group_chat_log_range(
         })
         .collect();
 
-    let _ = file.unlock();
+    let _ = lock_file.unlock();
     entries
 }
 
