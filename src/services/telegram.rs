@@ -12,6 +12,8 @@ use sha2::{Sha256, Digest};
 
 use crate::services::claude::{self, CancelToken, StreamMessage, DEFAULT_ALLOWED_TOOLS};
 use crate::services::codex;
+use crate::services::gemini;
+use crate::services::opencode;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
 
 /// Global debug log flag for Telegram API calls
@@ -461,6 +463,69 @@ fn sched_debug(msg: &str) {
 
 fn msg_debug(msg: &str) {
     crate::services::claude::debug_log_to("msg.log", msg);
+}
+
+/// Log an incoming Telegram message to ~/.cokacdir/logs/telegram_YYYY-MM-DD.jsonl
+fn log_incoming_message(msg: &Message, accepted: bool, reject_reason: &str) {
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y-%m-%d").to_string();
+    let ts = now.format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string();
+
+    let logs_dir = match dirs::home_dir() {
+        Some(h) => h.join(".cokacdir").join("logs"),
+        None => return,
+    };
+    let _ = fs::create_dir_all(&logs_dir);
+    let log_path = logs_dir.join(format!("telegram_{}.jsonl", date_str));
+
+    let chat_id = msg.chat.id.0;
+    let user_id = msg.from.as_ref().map(|u| u.id.0).unwrap_or(0);
+    let username = msg.from.as_ref()
+        .and_then(|u| u.username.as_deref())
+        .unwrap_or("");
+    let name = msg.from.as_ref()
+        .map(|u| u.first_name.as_str())
+        .unwrap_or("unknown");
+    let msg_id = msg.id.0;
+
+    let (msg_type, content) = if let Some(text) = msg.text() {
+        ("text", text.to_string())
+    } else if let Some(doc) = msg.document() {
+        let fname = doc.file_name.as_deref().unwrap_or("");
+        let caption = msg.caption().unwrap_or("");
+        ("document", format!("[{}] {}", fname, caption))
+    } else if msg.photo().is_some() {
+        ("photo", msg.caption().unwrap_or("").to_string())
+    } else if msg.sticker().is_some() {
+        ("sticker", String::new())
+    } else if msg.voice().is_some() {
+        ("voice", String::new())
+    } else if msg.video().is_some() {
+        ("video", msg.caption().unwrap_or("").to_string())
+    } else {
+        ("other", String::new())
+    };
+
+    let entry = serde_json::json!({
+        "ts": ts,
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "username": username,
+        "name": name,
+        "msg_id": msg_id,
+        "type": msg_type,
+        "content": content,
+        "accepted": accepted,
+        "reject_reason": if accepted { "" } else { reject_reason },
+    });
+
+    if let Ok(mut line) = serde_json::to_string(&entry) {
+        line.push('\n');
+        use std::io::Write;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
 }
 
 /// Bot-to-bot message entry read from ~/.cokacdir/messages/
@@ -1395,23 +1460,13 @@ async fn auto_restore_session(state: &SharedState, chat_id: ChatId, user_name: &
         return;
     }
     let auto_model = get_model(&data.settings, chat_id);
-    let auto_provider = if auto_model.is_some() {
-        if codex::is_codex_model(auto_model.as_deref()) { "codex" } else { "claude" }
-    } else if !claude::is_claude_available() && codex::is_codex_available() {
-        "codex"
-    } else {
-        "claude"
-    };
+    let auto_provider = detect_provider(auto_model.as_deref());
     msg_debug(&format!("[auto-restore] auto_provider={}, auto_model={:?}", auto_provider, auto_model));
     msg_debug(&format!("[auto-restore] step1: load_existing_session(path={:?}, provider={:?})", last_path, auto_provider));
     let existing = load_existing_session(&last_path, auto_provider)
         .or_else(|| {
             msg_debug("[auto-restore] step1 returned None → trying fallback from external source");
-            let provider = if auto_provider == "codex" {
-                SessionProvider::Codex
-            } else {
-                SessionProvider::Claude
-            };
+            let provider = provider_to_session(auto_provider);
             msg_debug(&format!("[auto-restore] step2: find_latest_session_by_cwd(path={:?}, provider={:?})", last_path, auto_provider));
             if let Some(info) = find_latest_session_by_cwd(&last_path, provider) {
                 msg_debug(&format!("[auto-restore] step2 found: jsonl={}, session_id={}", info.jsonl_path.display(), info.session_id));
@@ -1928,6 +1983,51 @@ pub async fn run_bot(token: &str) {
     let scheduler_bot_display_name = bot_display_name.clone();
     let scheduler_handle = tokio::spawn(scheduler_loop(scheduler_bot, scheduler_state, scheduler_token, scheduler_bot_username, scheduler_bot_display_name));
 
+    // Flush all pending updates so we don't process messages that arrived while
+    // the bot was offline.
+    // Step 1: getUpdates(offset=-1) discards all but the last pending update.
+    // Step 2: getUpdates(offset=last_id+1) confirms the last one too.
+    match bot.get_updates().offset(-1).limit(1).await {
+        Ok(updates) => {
+            if let Some(last) = updates.last() {
+                let next_offset = last.id.0.saturating_add(1).min(i32::MAX as u32) as i32;
+                msg_debug(&format!("[run_bot] flush step 1: got last update_id={}, confirming with offset={}",
+                    last.id.0, next_offset));
+                // Confirm the last update so teloxide::repl won't receive it.
+                // Retry until confirmed — must not let the last message leak through.
+                let mut confirmed = false;
+                for attempt in 1..=5 {
+                    match bot.get_updates().offset(next_offset).limit(0).await {
+                        Ok(_) => {
+                            msg_debug(&format!("[run_bot] flush step 2: confirmed offset={} (attempt {})", next_offset, attempt));
+                            confirmed = true;
+                            break;
+                        }
+                        Err(e) => {
+                            msg_debug(&format!("[run_bot] flush step 2 failed (attempt {}): {}", attempt, e));
+                            if attempt < 5 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt as u64)).await;
+                            }
+                        }
+                    }
+                }
+                if confirmed {
+                    println!("  ✓ Flushed pending updates (up to id={})", last.id.0);
+                } else {
+                    eprintln!("  ✗ FATAL: failed to confirm pending updates after 5 attempts — aborting to prevent processing stale messages");
+                    std::process::exit(1);
+                }
+            } else {
+                msg_debug("[run_bot] flush: no pending updates");
+                println!("  ✓ No pending updates");
+            }
+        }
+        Err(e) => {
+            msg_debug(&format!("[run_bot] failed to flush pending updates: {}", e));
+            println!("  ⚠ Failed to flush pending updates: {}", e);
+        }
+    }
+
     // Run polling loop with automatic reconnection on network failure.
     // teloxide::repl may panic or exit silently when the network drops
     // (especially on Windows). We wrap it in tokio::spawn to catch panics
@@ -2002,6 +2102,7 @@ async fn handle_message(
     // Auth check (imprinting)
     let Some(uid) = user_id else {
         // No user info (e.g. channel post) → reject
+        log_incoming_message(&msg, false, "no_user_id");
         return Ok(());
     };
     let is_group_chat = matches!(msg.chat.kind, teloxide::types::ChatKind::Public(_));
@@ -2034,6 +2135,7 @@ async fn handle_message(
                         // Unregistered user → reject silently (log only)
                         msg_debug(&format!("[handle_message] rejected non-owner uid={}", uid));
                         println!("  [{timestamp}] ✗ Rejected: {raw_user_name} (id:{uid})");
+                        log_incoming_message(&msg, false, "unauthorized");
                         return Ok(());
                     }
                     // Public group chat: allow non-owner user
@@ -2052,6 +2154,8 @@ async fn handle_message(
         // Owner registration is logged to server console only
         // No response sent to the user
     }
+
+    log_incoming_message(&msg, true, "");
 
     let user_name = format!("{}({uid})", raw_user_name);
 
@@ -2373,21 +2477,21 @@ async fn handle_message(
     } else if text.starts_with("/availabletools") {
         msg_debug("[handle_message] routing → /availabletools");
         println!("  [{timestamp}] ◀ [{user_name}] /availabletools");
-        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
-        if is_codex {
-            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        { let _m = get_model(&state.lock().await.settings, chat_id);
+        if provider_from_model(_m.as_deref()) != "claude" {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in this mode.").await)?;
         } else {
             handle_availabletools_command(&bot, chat_id, &state).await?;
-        }
+        } }
     } else if text.starts_with("/allowedtools") {
         msg_debug("[handle_message] routing → /allowedtools");
         println!("  [{timestamp}] ◀ [{user_name}] /allowedtools");
-        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
-        if is_codex {
-            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        { let _m = get_model(&state.lock().await.settings, chat_id);
+        if provider_from_model(_m.as_deref()) != "claude" {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in this mode.").await)?;
         } else {
             handle_allowedtools_command(&bot, chat_id, &state).await?;
-        }
+        } }
     } else if text.starts_with("/setpollingtime") {
         msg_debug("[handle_message] routing → /setpollingtime");
         println!("  [{timestamp}] ◀ [{user_name}] /setpollingtime {}", text.strip_prefix("/setpollingtime").unwrap_or("").trim());
@@ -2434,12 +2538,12 @@ async fn handle_message(
     } else if text.starts_with("/allowed") {
         msg_debug("[handle_message] routing → /allowed");
         println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
-        let is_codex = codex::is_codex_model(get_model(&state.lock().await.settings, chat_id).as_deref());
-        if is_codex {
-            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in Codex mode.").await)?;
+        { let _m = get_model(&state.lock().await.settings, chat_id);
+        if provider_from_model(_m.as_deref()) != "claude" {
+            tg!("send_message", bot.send_message(chat_id, "Tool permissions are not supported in this mode.").await)?;
         } else {
             handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
-        }
+        } }
     } else if text.starts_with('/') && is_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
         let workspace_id = text[1..].split_whitespace().next().unwrap();
         msg_debug(&format!("[handle_message] routing → workspace_resume: {}", workspace_id));
@@ -2520,7 +2624,7 @@ Ask in natural language to manage schedules.
 
 <b>Settings</b>
 <code>/model</code> — Show current AI model
-<code>/model &lt;name&gt;</code> — Set model (claude/claude:model/codex/codex:model)
+<code>/model &lt;name&gt;</code> — Set model (claude/codex/gemini or provider:model)
 <code>/setpollingtime &lt;ms&gt;</code> — Set API polling interval
   Too low may cause Telegram API rate limits.
   Minimum 2500ms, recommended 3000ms+.
@@ -2555,26 +2659,16 @@ async fn handle_start_command(
     let path_str = text.strip_prefix("/start").unwrap_or("").trim();
     msg_debug(&format!("[handle_start_command] chat_id={}, path_str={:?}", chat_id.0, path_str));
 
-    // Determine current provider (Claude vs Codex)
+    // Determine current provider (Claude vs Codex vs Gemini)
     let original_provider_str: &str;
+    let mut provider_str;
     let mut provider = {
         let data = state.lock().await;
         let model = get_model(&data.settings, chat_id);
-        let use_codex = if model.is_some() {
-            codex::is_codex_model(model.as_deref())
-        } else {
-            !claude::is_claude_available() && codex::is_codex_available()
-        };
-        msg_debug(&format!("[handle_start_command] model={:?}, use_codex={}", model, use_codex));
-        if use_codex {
-            SessionProvider::Codex
-        } else {
-            SessionProvider::Claude
-        }
-    };
-    let mut provider_str = match provider {
-        SessionProvider::Claude => "claude",
-        SessionProvider::Codex => "codex",
+        let p = detect_provider(model.as_deref());
+        msg_debug(&format!("[handle_start_command] model={:?}, provider={}", model, p));
+        provider_str = p;
+        provider_to_session(p)
     };
     original_provider_str = provider_str;
 
@@ -2642,11 +2736,10 @@ async fn handle_start_command(
         let other_provider = match provider {
             SessionProvider::Claude => SessionProvider::Codex,
             SessionProvider::Codex => SessionProvider::Claude,
+            SessionProvider::Gemini => SessionProvider::Claude,
+            SessionProvider::OpenCode => SessionProvider::Claude,
         };
-        let other_provider_str = match other_provider {
-            SessionProvider::Claude => "claude",
-            SessionProvider::Codex => "codex",
-        };
+        let other_provider_str = session_provider_str(other_provider);
 
         // Helper closure: try resolve_session + ai_sessions for a given provider
         let try_resolve = |prov: SessionProvider, prov_str: &str| -> Option<String> {
@@ -2696,6 +2789,8 @@ async fn handle_start_command(
             let other_available = match other_provider {
                 SessionProvider::Claude => claude::is_claude_available(),
                 SessionProvider::Codex => codex::is_codex_available(),
+                SessionProvider::Gemini => gemini::is_gemini_available(),
+                SessionProvider::OpenCode => opencode::is_opencode_available(),
             };
             msg_debug(&format!("[handle_start_command] cross-provider attempt: other={}, available={}", other_provider_str, other_available));
             let cross_resolved = if other_available {
@@ -2932,8 +3027,52 @@ fn is_uuid(s: &str) -> bool {
 }
 
 /// Provider that owns the resolved session.
-#[derive(Clone, Copy, Debug)]
-enum SessionProvider { Claude, Codex }
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SessionProvider { Claude, Codex, Gemini, OpenCode }
+
+/// Detect provider from model prefix only (no availability fallback).
+/// Returns "claude" when model is None or has no recognized prefix.
+fn provider_from_model(model: Option<&str>) -> &'static str {
+    if codex::is_codex_model(model) { "codex" }
+    else if gemini::is_gemini_model(model) { "gemini" }
+    else if opencode::is_opencode_model(model) { "opencode" }
+    else { "claude" }
+}
+
+/// Detect effective provider: from model prefix if set, otherwise from CLI availability.
+fn detect_provider(model: Option<&str>) -> &'static str {
+    if model.is_some() {
+        provider_from_model(model)
+    } else if !claude::is_claude_available() && codex::is_codex_available() {
+        "codex"
+    } else if !claude::is_claude_available() && gemini::is_gemini_available() {
+        "gemini"
+    } else if !claude::is_claude_available() && opencode::is_opencode_available() {
+        "opencode"
+    } else {
+        "claude"
+    }
+}
+
+/// Convert provider name to SessionProvider enum.
+fn provider_to_session(provider: &str) -> SessionProvider {
+    match provider {
+        "codex" => SessionProvider::Codex,
+        "gemini" => SessionProvider::Gemini,
+        "opencode" => SessionProvider::OpenCode,
+        _ => SessionProvider::Claude,
+    }
+}
+
+/// Convert SessionProvider enum to provider name string.
+fn session_provider_str(provider: SessionProvider) -> &'static str {
+    match provider {
+        SessionProvider::Claude => "claude",
+        SessionProvider::Codex => "codex",
+        SessionProvider::Gemini => "gemini",
+        SessionProvider::OpenCode => "opencode",
+    }
+}
 
 /// Info returned when an external session is resolved.
 struct ResolvedSession {
@@ -2957,6 +3096,8 @@ fn resolve_session(query: &str, provider: SessionProvider) -> Option<ResolvedSes
         SessionProvider::Codex => {
             resolve_codex_by_id(query)
         }
+        SessionProvider::Gemini => None, // Gemini sessions managed by gemini CLI
+        SessionProvider::OpenCode => None, // OpenCode sessions managed by opencode CLI
     };
     msg_debug(&format!("[resolve_session] result={}", match &result {
         Some(r) => format!("found(cwd={:?}, session_id={})", r.cwd, r.session_id),
@@ -3112,6 +3253,8 @@ fn convert_and_save_session(info: &ResolvedSession, canonical_path: &str) {
     let parser = match info.provider {
         SessionProvider::Claude => parse_claude_jsonl,
         SessionProvider::Codex  => parse_codex_jsonl,
+        SessionProvider::Gemini => return, // Gemini sessions not stored locally
+        SessionProvider::OpenCode => return, // OpenCode sessions not stored locally
     };
     msg_debug(&format!("[convert_session] parsing with provider={:?}", info.provider));
     let Some(session_data) = parser(&info.jsonl_path, &info.session_id, canonical_path) else {
@@ -3134,6 +3277,8 @@ fn find_latest_session_by_cwd(canonical_path: &str, provider: SessionProvider) -
     let result = match provider {
         SessionProvider::Claude => find_latest_claude_by_cwd(canonical_path),
         SessionProvider::Codex  => find_latest_codex_by_cwd(canonical_path),
+        SessionProvider::Gemini => None,
+        SessionProvider::OpenCode => None,
     };
     msg_debug(&format!("[find_latest_by_cwd] result={}", if result.is_some() { "found" } else { "None" }));
     result
@@ -3513,13 +3658,7 @@ async fn handle_workspace_resume(
     let ws_provider = {
         let data = state.lock().await;
         let ws_model = get_model(&data.settings, chat_id);
-        if ws_model.is_some() {
-            if codex::is_codex_model(ws_model.as_deref()) { "codex" } else { "claude" }
-        } else if !claude::is_claude_available() && codex::is_codex_available() {
-            "codex"
-        } else {
-            "claude"
-        }
+        detect_provider(ws_model.as_deref())
     };
     msg_debug(&format!("[workspace_resume] canonical_path={:?}, provider={}", canonical_path, ws_provider));
     let existing = load_existing_session(&canonical_path, ws_provider);
@@ -3528,7 +3667,7 @@ async fn handle_workspace_resume(
     let existing = if existing.is_some() {
         existing
     } else {
-        let provider = if ws_provider == "codex" { SessionProvider::Codex } else { SessionProvider::Claude };
+        let provider = provider_to_session(ws_provider);
         if let Some(info) = find_latest_session_by_cwd(&canonical_path, provider) {
             msg_debug(&format!("[workspace_resume] fallback found: jsonl={}, session_id={}", info.jsonl_path.display(), info.session_id));
             convert_and_save_session(&info, &canonical_path);
@@ -3617,7 +3756,7 @@ async fn handle_clear_command(
             session.pending_uploads.clear();
         }
         let mdl = get_model(&data.settings, chat_id);
-        let prov = if codex::is_codex_model(mdl.as_deref()) { "codex" } else { "claude" };
+        let prov = provider_from_model(mdl.as_deref());
         let stop_msg = data.stop_message_ids.remove(&chat_id);
         let uname = data.bot_username.clone();
         let dname = data.bot_display_name.clone();
@@ -3727,23 +3866,25 @@ async fn handle_session_command(
     chat_id: ChatId,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    let (session_id, current_path, is_codex) = {
+    let (session_id, current_path, session_prov) = {
         let data = state.lock().await;
         let sid = data.sessions.get(&chat_id).and_then(|s| s.session_id.clone());
         let path = data.sessions.get(&chat_id).and_then(|s| s.current_path.clone());
-        let codex = codex::is_codex_model(get_model(&data.settings, chat_id).as_deref());
-        (sid, path, codex)
+        let mdl = get_model(&data.settings, chat_id);
+        let prov = provider_from_model(mdl.as_deref());
+        (sid, path, prov)
     };
 
     shared_rate_limit_wait(state, chat_id).await;
     match (session_id, current_path) {
         (Some(id), Some(path)) => {
-            let resume_cmd = if is_codex {
-                format!("codex resume {}", id)
-            } else {
-                format!("claude --resume {}", id)
+            let resume_cmd = match session_prov {
+                "codex" => format!("codex resume {}", id),
+                "gemini" => format!("gemini --resume {}", id),
+                "opencode" => format!("opencode run --session {} --continue", id),
+                _ => format!("claude --resume {}", id),
             };
-            let provider = if is_codex { "Codex" } else { "Claude" };
+            let provider = match session_prov { "codex" => "Codex", "gemini" => "Gemini", "opencode" => "OpenCode", _ => "Claude" };
             let msg = format!(
                 "Current {} session ID:\n<code>{}</code>\n\nTo resume this session from your terminal:\n<code>cd \"{}\"; {}</code>",
                 provider, id, path, resume_cmd
@@ -3991,13 +4132,7 @@ async fn handle_file_upload(
     {
         let mut data = state.lock().await;
         let upload_model = get_model(&data.settings, chat_id);
-        let provider = if upload_model.is_some() {
-            if codex::is_codex_model(upload_model.as_deref()) { "codex" } else { "claude" }
-        } else if !claude::is_claude_available() && codex::is_codex_available() {
-            "codex"
-        } else {
-            "claude"
-        };
+        let provider = detect_provider(upload_model.as_deref());
         if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.history.push(HistoryItem {
                 item_type: HistoryType::User,
@@ -4947,6 +5082,18 @@ fn resolve_model_name(name: &str) -> Result<String, &'static str> {
         } else {
             Err("codex")
         }
+    } else if gemini::is_gemini_model(Some(name)) {
+        if gemini::is_gemini_available() {
+            Ok(name.to_string())
+        } else {
+            Err("gemini")
+        }
+    } else if opencode::is_opencode_model(Some(name)) {
+        if opencode::is_opencode_available() {
+            Ok(name.to_string())
+        } else {
+            Err("opencode")
+        }
     } else {
         Err("")  // invalid format
     }
@@ -4971,11 +5118,13 @@ async fn handle_model_command(
         };
         let has_claude = claude::is_claude_available();
         let has_codex = codex::is_codex_available();
+        let has_gemini = gemini::is_gemini_available();
+        let has_opencode = opencode::is_opencode_available();
 
         let mut msg = match &current {
             Some(m) => format!("Current model: <b>{}</b>\n", m),
             None => {
-                let default_provider = if has_claude { "claude" } else { "codex" };
+                let default_provider = if has_claude { "claude" } else if has_codex { "codex" } else if has_gemini { "gemini" } else { "opencode" };
                 format!("Current model: <b>default</b> ({})\n", default_provider)
             }
         };
@@ -4998,6 +5147,21 @@ async fn handle_model_command(
             msg.push_str("<code>/model codex:gpt-5.1-codex-max</code> — Codex-optimized model for deep and fast reasoning\n");
             msg.push_str("<code>/model codex:gpt-5.1-codex-mini</code> — Optimized for codex. Cheaper, faster, but less capable\n");
         }
+        if has_gemini {
+            msg.push_str("\n<b>Gemini:</b>\n");
+            msg.push_str("<code>/model gemini</code> — default\n");
+            msg.push_str("<code>/model gemini:gemini-3-pro</code> — Gemini 3 Pro\n");
+            msg.push_str("<code>/model gemini:gemini-3-flash</code> — Gemini 3 Flash\n");
+            msg.push_str("<code>/model gemini:gemini-2.5-pro</code> — Gemini 2.5 Pro\n");
+            msg.push_str("<code>/model gemini:gemini-2.5-flash</code> — Gemini 2.5 Flash\n");
+        }
+        if has_opencode {
+            msg.push_str("\n<b>OpenCode:</b>\n");
+            msg.push_str("<code>/model opencode</code> — default\n");
+            for model_id in opencode::list_models() {
+                msg.push_str(&format!("<code>/model opencode:{}</code>\n", model_id));
+            }
+        }
 
         shared_rate_limit_wait(state, chat_id).await;
         tg!("send_message", bot.send_message(chat_id, msg)
@@ -5017,11 +5181,12 @@ async fn handle_model_command(
                 let mut data = state.lock().await;
                 // If provider changed, clear session_id to avoid cross-provider resume
                 let old_model = get_model(&data.settings, chat_id);
-                let was_codex = codex::is_codex_model(old_model.as_deref());
-                let now_codex = codex::is_codex_model(Some(&model_id));
-                msg_debug(&format!("[handle_model_command] old_model={:?}, was_codex={}, now_codex={}, provider_changed={}",
-                    old_model, was_codex, now_codex, was_codex != now_codex));
-                if was_codex != now_codex {
+                let old_provider = provider_from_model(old_model.as_deref());
+                let new_provider = provider_from_model(Some(&model_id));
+                let provider_changed = old_provider != new_provider;
+                msg_debug(&format!("[handle_model_command] old_model={:?}, old_provider={}, new_provider={}, provider_changed={}",
+                    old_model, old_provider, new_provider, provider_changed));
+                if provider_changed {
                     if let Some(session) = data.sessions.get_mut(&chat_id) {
                         msg_debug(&format!("[handle_model_command] provider changed → clearing session + history (len={}, old_sid={:?}, old_path={:?})",
                             session.history.len(), session.session_id, session.current_path));
@@ -5048,7 +5213,9 @@ async fn handle_model_command(
             tg!("send_message", bot.send_message(chat_id,
                 "Invalid format. Use:\n\
                  <code>/model claude</code> or <code>/model claude:&lt;model&gt;</code>\n\
-                 <code>/model codex</code> or <code>/model codex:&lt;model&gt;</code>")
+                 <code>/model codex</code> or <code>/model codex:&lt;model&gt;</code>\n\
+                 <code>/model gemini</code> or <code>/model gemini:&lt;model&gt;</code>\n\
+                 <code>/model opencode</code> or <code>/model opencode:&lt;model&gt;</code>")
                 .parse_mode(ParseMode::Html)
                 .await)?;
         }
@@ -5191,13 +5358,39 @@ async fn handle_text_message(
     msg_debug(&format!("[handle_text_message] prompt_len={}, system_prompt_len={}, session_id={:?}, path={}, history_len={}",
         context_prompt.len(), system_prompt_owned.len(), session_id_clone, current_path_clone, history_clone.len()));
     tokio::task::spawn_blocking(move || {
-        let use_codex = if model_clone.is_some() {
-            codex::is_codex_model(model_clone.as_deref())
-        } else {
-            !claude::is_claude_available() && codex::is_codex_available()
-        };
-        msg_debug(&format!("[handle_text_message] use_codex={}, model={:?}", use_codex, model_clone));
-        let result = if use_codex {
+        let provider = detect_provider(model_clone.as_deref());
+        msg_debug(&format!("[handle_text_message] provider={}, model={:?}", provider, model_clone));
+        let result = if provider == "opencode" {
+            let opencode_model = model_clone.as_deref().and_then(opencode::strip_opencode_prefix);
+            msg_debug(&format!("[handle_text_message] → opencode::execute, opencode_model={:?}, session_id={:?}, path={}, prompt_len={}, system_prompt_len={}",
+                opencode_model, session_id_clone, current_path_clone, context_prompt.len(), system_prompt_owned.len()));
+            opencode::execute_command_streaming(
+                &context_prompt,
+                session_id_clone.as_deref(),
+                &current_path_clone,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                opencode_model,
+                false,
+            )
+        } else if provider == "gemini" {
+            let gemini_model = model_clone.as_deref().and_then(gemini::strip_gemini_prefix);
+            msg_debug(&format!("[handle_text_message] → gemini::execute, gemini_model={:?}, session_id={:?}, path={}, prompt_len={}, system_prompt_len={}",
+                gemini_model, session_id_clone, current_path_clone, context_prompt.len(), system_prompt_owned.len()));
+            gemini::execute_command_streaming(
+                &context_prompt,
+                session_id_clone.as_deref(),
+                &current_path_clone,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                gemini_model,
+                false,
+            )
+        } else if provider == "codex" {
             let codex_model = model_clone.as_deref().and_then(codex::strip_codex_prefix);
             // System prompt is always passed via -c model_instructions_file (handles both new & resume).
             // For new sessions without session_id, inject conversation history into the prompt.
@@ -5279,13 +5472,7 @@ async fn handle_text_message(
     let bot_username_for_log = bot_username_for_prompt.clone();
     let bot_display_name_for_log = bot_display_name_for_prompt.clone();
     let user_display_name_owned = user_display_name.to_string();
-    let provider_str: &'static str = if model.is_some() {
-        if codex::is_codex_model(model.as_deref()) { "codex" } else { "claude" }
-    } else if !claude::is_claude_available() && codex::is_codex_available() {
-        "codex"
-    } else {
-        "claude"
-    };
+    let provider_str: &'static str = detect_provider(model.as_deref());
     tokio::spawn(async move {
         let _group_lock = group_lock; // hold group chat lock until task ends
         const SPINNER: &[&str] = &[
@@ -7131,12 +7318,40 @@ async fn execute_schedule(
     let workspace_path_for_claude = workspace_path.clone();
     let model_clone_for_exec = model.clone();
     tokio::task::spawn_blocking(move || {
-        let use_codex = if model_clone_for_exec.is_some() {
-            codex::is_codex_model(model_clone_for_exec.as_deref())
-        } else {
-            !claude::is_claude_available() && codex::is_codex_available()
-        };
-        let result = if use_codex {
+        let provider = detect_provider(model_clone_for_exec.as_deref());
+        sched_debug(&format!("[execute_schedule:spawn_blocking] provider={}, model={:?}",
+            provider, model_clone_for_exec));
+        let result = if provider == "opencode" {
+            let opencode_model = model_clone_for_exec.as_deref().and_then(opencode::strip_opencode_prefix);
+            sched_debug(&format!("[execute_schedule] → opencode::execute, opencode_model={:?}, session_id=None, workspace={}, prompt_len={}, system_prompt_len={}",
+                opencode_model, workspace_path_for_claude, prompt.len(), system_prompt_owned.len()));
+            opencode::execute_command_streaming(
+                &prompt,
+                None,
+                &workspace_path_for_claude,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                opencode_model,
+                false,
+            )
+        } else if provider == "gemini" {
+            let gemini_model = model_clone_for_exec.as_deref().and_then(gemini::strip_gemini_prefix);
+            sched_debug(&format!("[execute_schedule] → gemini::execute, gemini_model={:?}, session_id=None, workspace={}, prompt_len={}, system_prompt_len={}",
+                gemini_model, workspace_path_for_claude, prompt.len(), system_prompt_owned.len()));
+            gemini::execute_command_streaming(
+                &prompt,
+                None,
+                &workspace_path_for_claude,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                gemini_model,
+                false,
+            )
+        } else if provider == "codex" {
             let codex_model = model_clone_for_exec.as_deref().and_then(codex::strip_codex_prefix);
             let codex_system_prompt = format!("{}{}", system_prompt_owned, codex_extra_instructions());
             codex::execute_command_streaming(
@@ -7568,13 +7783,9 @@ async fn execute_schedule(
         // Skip if execution was cancelled or encountered an error
         sched_debug(&format!("[execute_schedule] id={}, checking context summary: cancelled={}, had_error={}, type={}, once={:?}, has_context={}",
             schedule_id, cancelled, had_error, entry_clone.schedule_type, entry_clone.once, entry_clone.context_summary.is_some()));
-        let is_codex_sched = if model_for_summary.is_some() {
-            codex::is_codex_model(model_for_summary.as_deref())
-        } else {
-            !claude::is_claude_available() && codex::is_codex_available()
-        };
-        let new_context_summary = if is_codex_sched {
-            // Codex doesn't support session resume — skip summary extraction
+        let sched_provider = detect_provider(model_for_summary.as_deref());
+        let new_context_summary = if sched_provider != "claude" {
+            // Codex/Gemini: skip summary extraction (not supported via Claude API)
             sched_debug(&format!("[execute_schedule] id={}, Codex backend — skipping context summary", schedule_id));
             None
         } else if !cancelled && !had_error && entry_clone.schedule_type == "cron" && !entry_clone.once.unwrap_or(false) && entry_clone.context_summary.is_some() {
@@ -7628,7 +7839,7 @@ async fn execute_schedule(
                     content: full_response.clone(),
                 });
             }
-            let sched_provider = if is_codex_sched { "codex" } else { "claude" };
+            // sched_provider already computed above
             save_session_to_file(&sched_session, &workspace_path_owned, sched_provider);
         }
 
@@ -7846,13 +8057,39 @@ async fn process_bot_message(
     msg_debug(&format!("[process_bot_message] spawning AI backend: model={:?}, history_len={}, prompt_len={}",
         model_clone, history_clone.len(), prompt_for_ai.len()));
     tokio::task::spawn_blocking(move || {
-        let use_codex = if model_clone.is_some() {
-            codex::is_codex_model(model_clone.as_deref())
-        } else {
-            !claude::is_claude_available() && codex::is_codex_available()
-        };
-        msg_debug(&format!("[process_bot_message:spawn_blocking] use_codex={}, model={:?}", use_codex, model_clone));
-        let result = if use_codex {
+        let provider = detect_provider(model_clone.as_deref());
+        msg_debug(&format!("[process_bot_message:spawn_blocking] provider={}, model={:?}", provider, model_clone));
+        let result = if provider == "opencode" {
+            let opencode_model = model_clone.as_deref().and_then(opencode::strip_opencode_prefix);
+            msg_debug(&format!("[process_bot_message] → opencode::execute, opencode_model={:?}, session_id={:?}, path={}, prompt_len={}, system_prompt_len={}",
+                opencode_model, session_id_clone, current_path_clone, prompt_for_ai.len(), system_prompt_owned.len()));
+            opencode::execute_command_streaming(
+                &prompt_for_ai,
+                session_id_clone.as_deref(),
+                &current_path_clone,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                opencode_model,
+                false,
+            )
+        } else if provider == "gemini" {
+            let gemini_model = model_clone.as_deref().and_then(gemini::strip_gemini_prefix);
+            msg_debug(&format!("[process_bot_message] → gemini::execute, gemini_model={:?}, session_id={:?}, path={}, prompt_len={}, system_prompt_len={}",
+                gemini_model, session_id_clone, current_path_clone, prompt_for_ai.len(), system_prompt_owned.len()));
+            gemini::execute_command_streaming(
+                &prompt_for_ai,
+                session_id_clone.as_deref(),
+                &current_path_clone,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                gemini_model,
+                false,
+            )
+        } else if provider == "codex" {
             let codex_model = model_clone.as_deref().and_then(codex::strip_codex_prefix);
             let codex_system_prompt = format!("{}{}", system_prompt_owned, codex_extra_instructions());
             let is_resume = session_id_clone.is_some();
@@ -7920,13 +8157,7 @@ async fn process_bot_message(
     let bot_owned = bot.clone();
     let state_owned = state.clone();
     let msg_clone = msg.clone();
-    let provider_str: &'static str = if model.is_some() {
-        if codex::is_codex_model(model.as_deref()) { "codex" } else { "claude" }
-    } else if !claude::is_claude_available() && codex::is_codex_available() {
-        "codex"
-    } else {
-        "claude"
-    };
+    let provider_str: &'static str = detect_provider(model.as_deref());
     let current_path_owned = current_path.clone();
     let prompt_owned = prompt.clone();
     let bmsg_id_for_log = msg.id.clone();

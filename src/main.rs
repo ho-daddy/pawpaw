@@ -65,6 +65,7 @@ fn print_help() {
     println!("    -v, --version           Print version information");
     println!("    --prompt <TEXT>         Send prompt to AI and print rendered response");
     println!("    --design                Enable theme hot-reload (for theme development)");
+    println!("    --bridge <BACKEND>     Run as AI bridge (internal use, e.g. --bridge gemini)");
     println!("    --base64 <TEXT>         Decode base64 and print (internal use)");
     println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
     println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
@@ -781,6 +782,21 @@ fn main() -> io::Result<()> {
             "-v" | "--version" => {
                 print_version();
                 return Ok(());
+            }
+            "--bridge" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --bridge requires a backend argument (e.g. gemini)");
+                    std::process::exit(1);
+                }
+                let backend = &args[i + 1];
+                let remaining: Vec<String> = args[i + 2..].to_vec();
+                match backend.as_str() {
+                    "gemini" => crate::services::bridge::run_gemini(&remaining),
+                    _ => {
+                        eprintln!("Error: Unknown bridge backend '{}'. Supported: gemini", backend);
+                        std::process::exit(1);
+                    }
+                }
             }
             "--prompt" => {
                 if i + 1 >= args.len() {
