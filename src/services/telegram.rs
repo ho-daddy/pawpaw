@@ -349,6 +349,47 @@ pub fn read_group_chat_log_range(
     entries
 }
 
+/// Collect all bots that have ever appeared in a group chat log, with their
+/// most recent display name.  Scans the entire file including entries before
+/// clear markers (and the markers themselves) so that bots whose history was
+/// cleared are still listed.
+///
+/// Returns a Vec of (bot_username, Option<display_name>) sorted by username.
+pub fn collect_group_chat_bots(chat_id: i64) -> Vec<(String, Option<String>)> {
+    use fs2::FileExt;
+    use std::io::BufRead;
+
+    let Some(path) = group_chat_log_path(chat_id) else { return Vec::new() };
+
+    let lock_path = path.with_extension("jsonl.lock");
+    let Ok(lock_file) = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path) else { return Vec::new() };
+    if lock_file.lock_shared().is_err() { return Vec::new(); }
+
+    let Ok(file) = fs::File::open(&path) else {
+        let _ = lock_file.unlock();
+        return Vec::new();
+    };
+
+    // Scan forward — later entries overwrite earlier ones, keeping the latest display name
+    let mut bots: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    for line in std::io::BufReader::new(&file).lines().flatten() {
+        if let Ok(entry) = serde_json::from_str::<GroupChatLogEntry>(&line) {
+            if !entry.bot.is_empty() {
+                bots.insert(entry.bot.clone(), entry.bot_display_name);
+            }
+        }
+    }
+
+    let _ = lock_file.unlock();
+
+    let mut result: Vec<(String, Option<String>)> = bots.into_iter().collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
 /// Per-chat session state
 #[derive(Clone)]
 struct ChatSession {
@@ -1129,11 +1170,34 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
             ""
         };
 
+        // Build bot roster from the full log (including pre-clear entries)
+        let all_bots = collect_group_chat_bots(chat_id);
+        let my_bot = bot_username.trim_start_matches('@').to_lowercase();
+        let bot_roster: String = if all_bots.len() > 1 {
+            let list: String = all_bots.iter().map(|(uname, dname)| {
+                let is_me = uname.to_lowercase() == my_bot;
+                match dname {
+                    Some(dn) if !dn.is_empty() => {
+                        if is_me { format!("  • {}(@{}) ← YOU\n", dn, uname) }
+                        else { format!("  • {}(@{})\n", dn, uname) }
+                    }
+                    _ => {
+                        if is_me { format!("  • @{} ← YOU\n", uname) }
+                        else { format!("  • @{}\n", uname) }
+                    }
+                }
+            }).collect();
+            format!("\nBots in this chat ({}):\n{}", all_bots.len(), list)
+        } else {
+            String::new()
+        };
+
         format!(
             "\n\n\
              ── GROUP CHAT LOG ──\n\
              This group chat has multiple bots. Each bot can only see its own conversations.\n\
              A shared log records ALL bots' conversations so you can see what other bots discussed.\n\
+             {bot_roster}\
              Below are the most recent log entries. ALWAYS check these before responding to understand the current context.\n\
              {recent}{dedup}\
              \nFor older history, use:\n\
@@ -1144,6 +1208,7 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
              • Do NOT include raw log lines in your response. Summarize naturally instead.\n\
              • Do NOT announce that you are checking the log. Just respond naturally.\n\
              • Incorporate the information into your answer directly, as if you already knew it.",
+            bot_roster = bot_roster,
             recent = recent_section,
             dedup = dedup_warning,
             bin = shell_bin_path(),
@@ -1208,9 +1273,10 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
              ── GROUP CHAT CO-WORK CONTEXT ──\n\
              You are one of multiple bots operating in this group chat.\n\n\
              IMPORTANT — HOW GROUP CHAT WORKS FOR BOTS:\n\
-             • Your conversations with users are invisible to other bots until YOU actively share via --message\n\
-               or they check the shared log (--read_chat_log). If another bot needs to know, proactively share.\n\
-             • Likewise, other bots' conversations are invisible to you until they share or you check the shared log\n\
+             • Other bots CANNOT see your chat messages. Writing @botname in chat does NOTHING — the target bot will NOT receive it.\n\
+             • The ONLY way to send a message to another bot is the --message command (described in BOT MESSAGING below).\n\
+             • If you need another bot to act, you MUST use --message. There is no alternative. Mentioning them in chat text is useless.\n\
+             • Likewise, other bots' conversations are invisible to you until they share via --message or you check the shared log\n\
                (--read_chat_log) to see what they have been discussing.\n\
              • Each bot maintains its own independent session and working directory.\n\
                Other bots may be looking at completely different folders than you.\n\n\
@@ -7013,7 +7079,20 @@ fn format_cokacdir_result(content: &str) -> String {
     };
     let v: serde_json::Value = match serde_json::from_str(effective_content.trim()) {
         Ok(v) => v,
-        Err(_) => return effective_content.to_string(),
+        Err(_) => {
+            // Fallback: some backends (e.g. Gemini CLI) wrap the JSON output with
+            // extra text like "Output: {...}\nProcess Group PGID: ...".
+            // Try to extract the JSON object by trimming to first '{' and last '}'.
+            let trimmed = effective_content.trim();
+            let extracted = match (trimmed.find('{'), trimmed.rfind('}')) {
+                (Some(start), Some(end)) if start < end => &trimmed[start..=end],
+                _ => return effective_content.to_string(),
+            };
+            match serde_json::from_str(extracted) {
+                Ok(v) => v,
+                Err(_) => return effective_content.to_string(),
+            }
+        }
     };
 
     let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
