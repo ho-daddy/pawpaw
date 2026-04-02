@@ -69,7 +69,7 @@ fn print_help() {
     println!("    --design                Enable theme hot-reload (for theme development)");
     println!("    --bridge <BACKEND>     Run as AI bridge (internal use, e.g. --bridge gemini)");
     println!("    --base64 <TEXT>         Decode base64 and print (internal use)");
-    println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
+    println!("    --ccserver <TOKEN>...   Start bot server(s) (auto-detects Telegram/Discord)");
     println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
     println!("                            Send file via Telegram bot (internal use, HASH = token hash)");
     println!("    --currenttime            Print current server time");
@@ -635,10 +635,60 @@ fn print_version() {
     println!("cokacdir {}", VERSION);
 }
 
+/// Telegram token format: `<digits>:<alphanumeric_hash>`
+fn is_telegram_token(token: &str) -> bool {
+    if let Some((id_part, _hash_part)) = token.split_once(':') {
+        !id_part.is_empty() && id_part.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// Discord token format: `<base64>.<timestamp>.<hmac>` (contains dots, no colons)
+fn is_discord_token(token: &str) -> bool {
+    !token.contains(':') && token.chars().filter(|&c| c == '.').count() >= 2
+}
+
 fn handle_ccserver(tokens: Vec<String>) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    let title = format!("  cokacdir v{}  |  Telegram Bot Server  ", VERSION);
+    // Classify tokens by format:
+    //   "discord:<token>" → explicit Discord
+    //   "<digits>:<hash>" → Telegram  (e.g. 8603189801:AAHOgQ5z...)
+    //   "<base64>.<ts>.<hmac>" → Discord (e.g. MTQ4OTA3..._zZ5-.fAh9...)
+    let mut tg_tokens: Vec<String> = Vec::new();
+    let mut discord_tokens: Vec<String> = Vec::new();
+    for token in &tokens {
+        if let Some(dt) = token.strip_prefix("discord:") {
+            discord_tokens.push(dt.to_string());
+        } else if is_telegram_token(token) {
+            tg_tokens.push(token.clone());
+        } else if is_discord_token(token) {
+            discord_tokens.push(token.clone());
+        } else {
+            // Unknown format — assume Telegram for backward compatibility
+            tg_tokens.push(token.clone());
+        }
+    }
+
+    // Log token classification
+    for (i, token) in tokens.iter().enumerate() {
+        let kind = if token.starts_with("discord:") {
+            "discord (explicit)"
+        } else if is_telegram_token(token) {
+            "telegram (auto)"
+        } else if is_discord_token(token) {
+            "discord (auto)"
+        } else {
+            "telegram (fallback)"
+        };
+        // Mask token for security: show first 8 chars only
+        let masked = if token.len() > 8 { &token[..8] } else { token };
+        eprintln!("  [ccserver] token #{}: {} → {}", i + 1, kind, format!("{}...", masked));
+    }
+
+    let total = tg_tokens.len() + discord_tokens.len();
+    let title = format!("  cokacdir v{}  |  Bot Server  ", VERSION);
     let width = title.chars().count();
     println!();
     println!("  ┌{}┐", "─".repeat(width));
@@ -660,23 +710,35 @@ fn handle_ccserver(tokens: Vec<String>) {
         eprintln!("  Install Claude CLI, Codex CLI, Gemini CLI, or OpenCode.");
         return;
     }
+
+    if !tg_tokens.is_empty() {
+        println!("  ▸ Telegram     : {} bot(s)", tg_tokens.len());
+    }
+    if !discord_tokens.is_empty() {
+        println!("  ▸ Discord      : {} bot(s)", discord_tokens.len());
+    }
     println!();
 
-    if tokens.len() == 1 {
-        println!("  ▸ Bot instance : 1");
-        println!("  ▸ Status       : Connecting...");
-        println!();
-        rt.block_on(services::telegram::run_bot(&tokens[0]));
+    if total == 1 && discord_tokens.is_empty() {
+        // Single Telegram bot — run directly
+        rt.block_on(services::telegram::run_bot(&tg_tokens[0], None));
+    } else if total == 1 && tg_tokens.is_empty() {
+        // Single Discord bot — run bridge directly
+        let args = vec![discord_tokens[0].clone()];
+        rt.block_on(services::messenger_bridge::run_bridge("discord", &args));
     } else {
-        println!("  ▸ Bot instances : {}", tokens.len());
-        println!("  ▸ Status        : Connecting...");
-        println!();
+        // Multiple bots — spawn all concurrently
         rt.block_on(async {
             let mut handles = Vec::new();
-            for (i, token) in tokens.into_iter().enumerate() {
+            for token in tg_tokens {
                 handles.push(tokio::spawn(async move {
-                    println!("  ✓ Bot #{} connected", i + 1);
-                    services::telegram::run_bot(&token).await;
+                    services::telegram::run_bot(&token, None).await;
+                }));
+            }
+            for dt in discord_tokens {
+                handles.push(tokio::spawn(async move {
+                    let args = vec![dt];
+                    services::messenger_bridge::run_bridge("discord", &args).await;
                 }));
             }
             for handle in handles {

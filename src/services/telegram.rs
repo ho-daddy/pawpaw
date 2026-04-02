@@ -526,6 +526,25 @@ fn msg_debug(msg: &str) {
     crate::services::claude::debug_log_to("msg.log", msg);
 }
 
+/// Always-on debug log (independent of /debug toggle).
+/// Writes to ~/.cokacdir/debug/ai_trace.log for diagnosing AI execution issues.
+fn ai_trace(msg: &str) {
+    if let Some(home) = dirs::home_dir() {
+        let debug_dir = home.join(".cokacdir").join("debug");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let log_path = debug_dir.join("ai_trace.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(log_path)
+        {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            let _ = std::io::Write::write_fmt(&mut file, format_args!("[{}] {}\n", timestamp, msg));
+        }
+    }
+}
+
 /// Log an incoming Telegram message to ~/.cokacdir/logs/telegram_YYYY-MM-DD.jsonl
 fn log_incoming_message(msg: &Message, accepted: bool, reject_reason: &str) {
     let now = chrono::Local::now();
@@ -1092,8 +1111,69 @@ fn shell_bin_path() -> String {
     crate::utils::format::to_shell_path(crate::bin_path())
 }
 
-/// Build the system prompt for Telegram AI sessions
-fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &str, disabled_notice: &str, session_id: Option<&str>, bot_username: &str, bot_display_name: &str, user_message: Option<&str>, context_count: usize) -> String {
+const DEFAULT_COWORK_GUIDELINES: &str = "\
+FOR EFFECTIVE CO-WORK, BE AWARE OF:
+1. WHO is here — Check the group chat log to discover which bots are active in this chat.
+2. WHERE each bot works — Other bots may have different working directories. Check the log or ask them via --message.
+3. WHAT each bot is doing — Read the log to understand ongoing tasks before starting your own.
+4. SHARED GOAL — When the user gives a collaborative task, understand the overall objective and your part in it.
+
+CO-WORK GUIDELINES:
+• Before starting work, check the chat log to understand the current state of collaboration.
+• Clearly state what you are working on — your messages are recorded in the shared log for other bots.
+• Before modifying shared files or directories, check the log to see if another bot is working on the same area.
+• When your work depends on or affects another bot's output, communicate via --message (described below).
+• If you need results from another bot's task, check the log first — the answer may already be there.
+
+NO-REPEAT RULE (CRITICAL — READ CAREFULLY):
+Before responding, check the group chat log for responses from OTHER bots to the SAME user request.
+If another bot has ALREADY responded to the same request:
+• Do NOT answer the same question again — not even in different words.
+• Do NOT perform the same task again — not even with a different approach.
+• Do NOT summarize, rephrase, or restate what the previous bot already said.
+• Instead, choose ONE of these actions:
+  1. ADD NEW VALUE: provide information the previous bot missed, a different angle, or deeper analysis on an aspect they didn't cover.
+  2. TAKE THE NEXT STEP: if the previous bot completed a task, do the logical follow-up action (e.g., bot 1 analyzed the problem → you implement the fix; bot 1 wrote code → you test it).
+  3. REVIEW & BUILD: evaluate the previous bot's output and extend it (e.g., point out edge cases, suggest improvements, add error handling).
+  4. ACKNOWLEDGE & SKIP: if the previous bot's answer is already complete and sufficient, briefly acknowledge (one sentence) and do NOT elaborate further.
+• The worst outcome is two bots saying essentially the same thing. When in doubt, choose option 4 (acknowledge & skip) over repeating.
+
+INDIVIDUALITY RULE:
+Each bot is an independent entity with its own personality and perspective.
+Express your viewpoint in your own voice. Never parrot or echo another bot.
+
+BREVITY RULE:
+You are a participant in a group chat. Writing long messages alone is inconsiderate to other participants.
+Keep your answers short and concise — ideally one or two sentences.";
+
+/// Load co-work guidelines from ~/.cokacdir/prompt/cowork.md.
+/// If the file does not exist, creates it with default content.
+fn load_cowork_guidelines() -> String {
+    if let Some(home) = dirs::home_dir() {
+        let prompt_dir = home.join(".cokacdir").join("prompt");
+        let cowork_path = prompt_dir.join("cowork.md");
+        if cowork_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&cowork_path) {
+                let trimmed = content.trim().to_string();
+                msg_debug(&format!("[load_cowork_guidelines] loaded from file: {}, len={}, empty={}",
+                    cowork_path.display(), trimmed.len(), trimmed.is_empty()));
+                return trimmed;
+            } else {
+                msg_debug(&format!("[load_cowork_guidelines] failed to read file: {}", cowork_path.display()));
+            }
+        } else {
+            // Auto-generate default file
+            let _ = std::fs::create_dir_all(&prompt_dir);
+            let _ = std::fs::write(&cowork_path, DEFAULT_COWORK_GUIDELINES);
+            msg_debug(&format!("[load_cowork_guidelines] created default file: {}", cowork_path.display()));
+        }
+    }
+    msg_debug("[load_cowork_guidelines] using built-in default");
+    DEFAULT_COWORK_GUIDELINES.to_string()
+}
+
+/// Build the system prompt for AI sessions
+fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &str, disabled_notice: &str, session_id: Option<&str>, bot_username: &str, bot_display_name: &str, user_message: Option<&str>, context_count: usize, platform: &str) -> String {
     msg_debug(&format!("[build_system_prompt] chat_id={}, bot_username={:?}, bot_display_name={:?}, session_id={:?}, disabled_notice_len={}, role_len={}",
         chat_id, bot_username, bot_display_name, session_id, disabled_notice.len(), role.len()));
     let is_group_chat = chat_id < 0 && context_count > 0;
@@ -1297,7 +1377,9 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
         String::new()
     };
     let group_chat_cowork_section = if !bot_username.is_empty() && is_group_chat {
-        String::from(
+        let cowork_guidelines = load_cowork_guidelines();
+        msg_debug(&format!("[build_system_prompt] cowork_guidelines loaded, len={}", cowork_guidelines.len()));
+        format!(
             "\n\n\
              ── GROUP CHAT CO-WORK CONTEXT ──\n\
              You are one of multiple bots operating in this group chat.\n\n\
@@ -1309,35 +1391,7 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
                (--read_chat_log) to see what they have been discussing.\n\
              • Each bot maintains its own independent session and working directory.\n\
                Other bots may be looking at completely different folders than you.\n\n\
-             FOR EFFECTIVE CO-WORK, BE AWARE OF:\n\
-             1. WHO is here — Check the group chat log to discover which bots are active in this chat.\n\
-             2. WHERE each bot works — Other bots may have different working directories. Check the log or ask them via --message.\n\
-             3. WHAT each bot is doing — Read the log to understand ongoing tasks before starting your own.\n\
-             4. SHARED GOAL — When the user gives a collaborative task, understand the overall objective and your part in it.\n\n\
-             CO-WORK GUIDELINES:\n\
-             • Before starting work, check the chat log to understand the current state of collaboration.\n\
-             • Clearly state what you are working on — your messages are recorded in the shared log for other bots.\n\
-             • Before modifying shared files or directories, check the log to see if another bot is working on the same area.\n\
-             • When your work depends on or affects another bot's output, communicate via --message (described below).\n\
-             • If you need results from another bot's task, check the log first — the answer may already be there.\n\n\
-             NO-REPEAT RULE (CRITICAL — READ CAREFULLY):\n\
-             Before responding, check the group chat log for responses from OTHER bots to the SAME user request.\n\
-             If another bot has ALREADY responded to the same request:\n\
-             • Do NOT answer the same question again — not even in different words.\n\
-             • Do NOT perform the same task again — not even with a different approach.\n\
-             • Do NOT summarize, rephrase, or restate what the previous bot already said.\n\
-             • Instead, choose ONE of these actions:\n\
-               1. ADD NEW VALUE: provide information the previous bot missed, a different angle, or deeper analysis on an aspect they didn't cover.\n\
-               2. TAKE THE NEXT STEP: if the previous bot completed a task, do the logical follow-up action (e.g., bot 1 analyzed the problem → you implement the fix; bot 1 wrote code → you test it).\n\
-               3. REVIEW & BUILD: evaluate the previous bot's output and extend it (e.g., point out edge cases, suggest improvements, add error handling).\n\
-               4. ACKNOWLEDGE & SKIP: if the previous bot's answer is already complete and sufficient, briefly acknowledge (one sentence) and do NOT elaborate further.\n\
-             • The worst outcome is two bots saying essentially the same thing. When in doubt, choose option 4 (acknowledge & skip) over repeating.\n\n\
-             INDIVIDUALITY RULE:\n\
-             Each bot is an independent entity with its own personality and perspective.\n\
-             Express your viewpoint in your own voice. Never parrot or echo another bot.\n\n\
-             BREVITY RULE:\n\
-             You are a participant in a group chat. Writing long messages alone is inconsiderate to other participants.\n\
-             Keep your answers short and concise — ideally one or two sentences.",
+             {cowork_guidelines}",
         )
     } else {
         String::new()
@@ -1355,7 +1409,7 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
          Always keep the user informed about what you are doing. \
          Briefly explain each step as you work (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\"). \
          The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
-         IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
+         IMPORTANT: The user is on {platform} and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
          Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
          Response format: Use Markdown by default, but do NOT use Markdown tables.\n\n\
@@ -1364,7 +1418,7 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
          ═══════════════════════════════════════\n\
          All commands output JSON. Success: {{\"status\":\"ok\",...}}, Error: {{\"status\":\"error\",\"message\":\"...\"}}\n\n\
          ── FILE DELIVERY ──\n\
-         Send a file to the user's Telegram chat:\n\
+         Send a file to the user's {platform} chat:\n\
          \"{bin}\" --sendfile <FILEPATH> --chat {chat_id} --key {bot_key}\n\
          • Use this whenever your work produces a file (code, reports, images, archives, etc.)\n\
          • Do NOT tell the user to use /down — always use this command instead\n\
@@ -1555,6 +1609,8 @@ struct SharedData {
     bot_username: String,
     /// Bot's display name (first_name from Telegram API)
     bot_display_name: String,
+    /// API base URL (default: "https://api.telegram.org", bridge: "http://127.0.0.1:<port>")
+    api_base_url: String,
 }
 
 type SharedState = Arc<Mutex<SharedData>>;
@@ -1725,6 +1781,25 @@ pub fn token_hash(token: &str) -> String {
     hasher.update(token.as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..8]) // 16 hex chars
+}
+
+/// Detect the messenger platform from the bot token.
+/// Bridge tokens use the format "bridge_<platform>_<hash>".
+fn detect_platform(token: &str) -> &str {
+    if let Some(rest) = token.strip_prefix("bridge_") {
+        rest.split('_').next().unwrap_or("Messenger")
+    } else {
+        "Telegram"
+    }
+}
+
+/// Capitalize first letter (e.g. "discord" → "Discord")
+fn capitalize_platform(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 /// Path to bot settings file: ~/.cokacdir/bot_settings.json
@@ -2070,9 +2145,25 @@ fn risk_badge(destructive: bool) -> &'static str {
     if destructive { "!!!" } else { "" }
 }
 
-/// Entry point: start the Telegram bot with long polling
-pub async fn run_bot(token: &str) {
+/// Entry point: start the Telegram bot with long polling.
+/// `api_url`: Optional API base URL override (used by messenger bridge proxy).
+///            When None, connects to the real Telegram API.
+pub async fn run_bot(token: &str, api_url: Option<&str>) {
+    let api_base_url = api_url.unwrap_or("https://api.telegram.org");
+    msg_debug(&format!("[run_bot] api_url={:?}, api_base_url={}", api_url.is_some(), api_base_url));
     let bot = Bot::new(token);
+    let bot = if let Some(url) = api_url {
+        msg_debug(&format!("[run_bot] setting custom api_url: {}", url));
+        match reqwest::Url::parse(url) {
+            Ok(parsed) => bot.set_api_url(parsed),
+            Err(e) => {
+                msg_debug(&format!("[run_bot] api_url parse failed: {}", e));
+                bot
+            }
+        }
+    } else {
+        bot
+    };
     let mut bot_settings = load_bot_settings(token);
 
     // Get bot's own username and display name for @mention filtering in group chats
@@ -2157,6 +2248,7 @@ pub async fn run_bot(token: &str) {
         message_queues: HashMap::new(),
         bot_username: bot_username.clone(),
         bot_display_name: bot_display_name.clone(),
+        api_base_url: api_base_url.to_string(),
     }));
 
     println!("  ✓ Bot connected — Listening for messages");
@@ -2970,8 +3062,9 @@ async fn handle_help_command(
     chat_id: ChatId,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    let help = "\
-<b>cokacdir Telegram Bot</b>
+    let platform = capitalize_platform(detect_platform(bot.token()));
+    let help = format!("\
+<b>cokacdir {} Bot</b>
 Manage server files &amp; chat with Claude AI.
 
 <b>Session</b>
@@ -3021,7 +3114,7 @@ Ask in natural language to manage schedules.
 <code>/model</code> — Show current AI model
 <code>/model &lt;name&gt;</code> — Set model (claude/codex/gemini or provider:model)
 <code>/setpollingtime &lt;ms&gt;</code> — Set API polling interval
-  Too low may cause Telegram API rate limits.
+  Too low may cause API rate limits.
   Minimum 2500ms, recommended 3000ms+.
 <code>/debug</code> — Toggle debug logging
 <code>/silent</code> — Toggle silent mode (hide tool calls)
@@ -3032,7 +3125,7 @@ Ask in natural language to manage schedules.
 <b>Bot Messaging</b>
 Bots in the same group can collaborate via <code>/instruction</code>.
 
-<code>/help</code> — Show this help";
+<code>/help</code> — Show this help", platform);
 
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, help)
@@ -4921,7 +5014,12 @@ async fn handle_file_upload(
     // Download file from Telegram via HTTP
     shared_rate_limit_wait(state, chat_id).await;
     let file = tg!("get_file", bot.get_file(&file_id).await)?;
-    let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
+    let base = {
+        let data = state.lock().await;
+        data.api_base_url.clone()
+    };
+    let url = format!("{}/file/bot{}/{}", base, bot.token(), file.path);
+    msg_debug(&format!("[handle_upload] download url: api_base={}, file_path={}", base, file.path));
     let buf = match reqwest::get(&url).await {
         Ok(resp) => match resp.bytes().await {
             Ok(bytes) => bytes,
@@ -6258,6 +6356,7 @@ async fn handle_text_message(
 ) -> ResponseResult<()> {
     msg_debug(&format!("[handle_text_message] START chat_id={}, user_text={:?}, from_queue={}",
         chat_id.0, truncate_str(user_text, 100), from_queue));
+    ai_trace(&format!("[START] chat_id={}, user_text={:?}, from_queue={}", chat_id.0, truncate_str(user_text, 100), from_queue));
 
     // Register cancel token early (prevents duplicate requests while waiting for group lock)
     let cancel_token = Arc::new(CancelToken::new());
@@ -6449,15 +6548,17 @@ async fn handle_text_message(
 
     // Build system prompt with sendfile and schedule instructions
     let bot_key_for_prompt = token_hash(bot.token());
+    let platform = capitalize_platform(detect_platform(bot.token()));
     let role = match &instruction {
-        Some(instr) => format!("You are chatting with a user through Telegram.\n\nUser's instruction for this chat:\n{}", instr),
-        None => "You are chatting with a user through Telegram.".to_string(),
+        Some(instr) => format!("You are chatting with a user through {}.\n\nUser's instruction for this chat:\n{}", platform, instr),
+        None => format!("You are chatting with a user through {}.", platform),
     };
+    ai_trace(&format!("[PROMPT] platform={}, role_len={}, path={}, bot_key={}", platform, role.len(), current_path, bot_key_for_prompt));
     let system_prompt_owned = build_system_prompt(
         &role,
         &current_path, chat_id.0, &bot_key_for_prompt, &disabled_notice,
         session_id.as_deref(), &bot_username_for_prompt, &bot_display_name_for_prompt,
-        Some(user_text), context_count,
+        Some(user_text), context_count, &platform,
     );
 
     // Create channel for streaming
@@ -6475,6 +6576,8 @@ async fn handle_text_message(
     tokio::task::spawn_blocking(move || {
         let provider = detect_provider(model_clone.as_deref());
         msg_debug(&format!("[handle_text_message] provider={}, model={:?}", provider, model_clone));
+        ai_trace(&format!("[EXEC] provider={}, model={:?}, prompt_len={}, system_prompt_len={}, history_len={}, session={:?}, path={}",
+            provider, model_clone, context_prompt.len(), system_prompt_owned.len(), history_clone.len(), session_id_clone, current_path_clone));
         let result = if provider == "opencode" {
             let opencode_model = model_clone.as_deref().and_then(opencode::strip_opencode_prefix);
             msg_debug(&format!("[handle_text_message] → opencode::execute, opencode_model={:?}, session_id={:?}, path={}, prompt_len={}, system_prompt_len={}",
@@ -6571,8 +6674,14 @@ async fn handle_text_message(
         };
 
         match &result {
-            Ok(()) => msg_debug("[handle_text_message] execute completed OK"),
-            Err(e) => msg_debug(&format!("[handle_text_message] execute error: {}", e)),
+            Ok(()) => {
+                msg_debug("[handle_text_message] execute completed OK");
+                ai_trace("[EXEC] completed OK");
+            }
+            Err(e) => {
+                msg_debug(&format!("[handle_text_message] execute error: {}", e));
+                ai_trace(&format!("[EXEC] ERROR: {}", e));
+            }
         }
         if let Err(e) = result {
             let _ = tx.send(StreamMessage::Error { message: e, stdout: String::new(), stderr: String::new(), exit_code: None });
@@ -6606,7 +6715,6 @@ async fn handle_text_message(
         let mut pending_cokacdir = false;
         let mut suppress_tool_display = false;
         let mut last_tool_name: String = String::new();
-        let is_group_chat = chat_id.0 < 0;
         let mut placeholder_msg_id = placeholder_msg_id;
         let mut last_confirmed_len: usize = 0;
 
@@ -6641,11 +6749,13 @@ async fn handle_text_message(
                             match msg {
                                 StreamMessage::Init { session_id: sid } => {
                                     msg_debug(&format!("[polling] Init: session_id={}", sid));
+                                    ai_trace(&format!("[STREAM] Init: session_id={}", sid));
                                     new_session_id = Some(sid);
                                 }
                                 StreamMessage::Text { content } => {
                                     msg_debug(&format!("[polling] Text: {} chars, preview={:?}",
                                         content.len(), truncate_str(&content, 80)));
+                                    ai_trace(&format!("[STREAM] Text: {} chars, total_so_far={}", content.len(), full_response.len() + content.len()));
                                     raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: content.clone() });
                                     full_response.push_str(&content);
                                 }
@@ -6721,6 +6831,7 @@ async fn handle_text_message(
                                 StreamMessage::Done { result, session_id: sid } => {
                                     msg_debug(&format!("[polling] Done: result_len={}, session_id={:?}, full_response_len={}",
                                         result.len(), sid, full_response.len()));
+                                    ai_trace(&format!("[STREAM] Done: result_len={}, full_response_len={}, session_id={:?}", result.len(), full_response.len(), sid));
                                     if !result.is_empty() && full_response.is_empty() {
                                         msg_debug(&format!("[polling] Done: fallback full_response = result ({})", result.len()));
                                         full_response = result.clone();
@@ -6736,6 +6847,7 @@ async fn handle_text_message(
                                 StreamMessage::Error { message, stdout, stderr, exit_code } => {
                                     msg_debug(&format!("[polling] Error: message={}, exit_code={:?}, stdout_len={}, stderr_len={}",
                                         message, exit_code, stdout.len(), stderr.len()));
+                                    ai_trace(&format!("[STREAM] Error: message={}, exit_code={:?}, stdout_len={}, stderr_len={}", message, exit_code, stdout.len(), stderr.len()));
                                     let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
                                     let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
                                     let code_display = match exit_code {
@@ -6753,14 +6865,15 @@ async fn handle_text_message(
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            ai_trace(&format!("[STREAM] Channel DISCONNECTED: full_response_len={}", full_response.len()));
                             done = true;
                             break;
                         }
                     }
                 }
 
-                if is_group_chat && !done {
-                    // ── Group chat: rolling placeholder pattern ──
+                if !done {
+                    // ── Rolling placeholder pattern (unified for all chats) ──
                     if full_response.len() > last_confirmed_len {
                         // New content arrived — finalize current placeholder with delta
                         let delta = &full_response[last_confirmed_len..];
@@ -6799,7 +6912,7 @@ async fn handle_text_message(
                                 }
                                 Err(e) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}]   ⚠ new placeholder failed (group): {e}");
+                                    println!("  [{ts}]   ⚠ new placeholder failed: {e}");
                                     msg_debug(&format!("[rolling_ph] NEW placeholder FAILED: keeping msg_id={}, err={}", placeholder_msg_id, e));
                                 }
                             }
@@ -6818,41 +6931,13 @@ async fn handle_text_message(
                                 .parse_mode(ParseMode::Html).await)
                             {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚠ edit_message failed (streaming/group): {e}");
+                                println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
                             }
                             last_edit_text = display_text;
                         } else {
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                         }
-                    }
-                } else if !done {
-                    // ── Private chat: existing behavior ──
-                    let indicator = SPINNER[spin_idx % SPINNER.len()];
-                    spin_idx += 1;
-
-                    let display_text = if full_response.is_empty() {
-                        indicator.to_string()
-                    } else {
-                        let normalized = normalize_empty_lines(&full_response);
-                        let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 20);
-                        format!("{}\n\n{}", truncated, indicator)
-                    };
-
-                    if display_text != last_edit_text {
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let html_text = markdown_to_telegram_html(&display_text);
-                        if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
-                            .parse_mode(ParseMode::Html)
-                            .await)
-                        {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
-                        }
-                        last_edit_text = display_text;
-                    } else {
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                     }
                 }
             }
@@ -6871,95 +6956,56 @@ async fn handle_text_message(
 
                 // Final response
                 if full_response.is_empty() {
+                    ai_trace(&format!("[FINAL] full_response is EMPTY → (No response). cancelled={}, last_confirmed_len={}", cancelled, last_confirmed_len));
                     full_response = "(No response)".to_string();
+                } else {
+                    ai_trace(&format!("[FINAL] full_response_len={}, last_confirmed_len={}, remaining_len={}",
+                        full_response.len(), last_confirmed_len, full_response.len().saturating_sub(last_confirmed_len)));
                 }
 
                 let final_response = normalize_empty_lines(&full_response);
 
-                if is_group_chat {
-                    // ── Group chat: send only remaining delta ──
-                    if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                    let remaining = &full_response[last_confirmed_len..];
-                    msg_debug(&format!("[rolling_ph] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
-                        placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
-                    if remaining.trim().is_empty() {
-                        // No new content — delete the spinner placeholder
-                        msg_debug(&format!("[rolling_ph] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                    } else {
-                        let normalized_remaining = normalize_empty_lines(remaining);
-                        let html_remaining = markdown_to_telegram_html(&normalized_remaining);
-                        msg_debug(&format!("[rolling_ph] FINAL EDIT placeholder: msg_id={}, html_len={}", placeholder_msg_id, html_remaining.len()));
-                        if html_remaining.len() <= TELEGRAM_MSG_LIMIT {
-                            if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_remaining)
-                                .parse_mode(ParseMode::Html).await)
-                            {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚠ edit_message failed (final/group HTML): {e}");
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &normalized_remaining).await);
-                            }
-                        } else {
-                            let send_result = send_long_message(&bot_owned, chat_id, &html_remaining, Some(ParseMode::Html), &state_owned).await;
-                            match send_result {
-                                Ok(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                }
-                                Err(_) => {
-                                    let fallback = send_long_message(&bot_owned, chat_id, &normalized_remaining, None, &state_owned).await;
-                                    match fallback {
-                                        Ok(_) => {
-                                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                        }
-                                        Err(_) => {
-                                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                                            let truncated = truncate_str(&normalized_remaining, TELEGRAM_MSG_LIMIT);
-                                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // ── Send only remaining delta (unified rolling placeholder) ──
+                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+                let remaining = &full_response[last_confirmed_len..];
+                msg_debug(&format!("[rolling_ph] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
+                    placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
+                if remaining.trim().is_empty() {
+                    // No new content — delete the spinner placeholder
+                    msg_debug(&format!("[rolling_ph] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                 } else {
-                    // ── Private chat: existing behavior ──
-                    let html_response = markdown_to_telegram_html(&final_response);
-                    if html_response.len() <= TELEGRAM_MSG_LIMIT {
-                        if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
-                            .parse_mode(ParseMode::Html)
-                            .await)
+                    let normalized_remaining = normalize_empty_lines(remaining);
+                    let html_remaining = markdown_to_telegram_html(&normalized_remaining);
+                    msg_debug(&format!("[rolling_ph] FINAL EDIT placeholder: msg_id={}, html_len={}", placeholder_msg_id, html_remaining.len()));
+                    if html_remaining.len() <= TELEGRAM_MSG_LIMIT {
+                        if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_remaining)
+                            .parse_mode(ParseMode::Html).await)
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}]   ⚠ edit_message failed (HTML): {e}");
+                            println!("  [{ts}]   ⚠ edit_message failed (final HTML): {e}");
                             shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_response)
-                                .await);
+                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &normalized_remaining).await);
                         }
                     } else {
-                        let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
+                        let send_result = send_long_message(&bot_owned, chat_id, &html_remaining, Some(ParseMode::Html), &state_owned).await;
                         match send_result {
                             Ok(_) => {
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                             }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚠ send_long_message failed (HTML): {e}");
-                                let fallback_result = send_long_message(&bot_owned, chat_id, &final_response, None, &state_owned).await;
-                                match fallback_result {
+                            Err(_) => {
+                                let fallback = send_long_message(&bot_owned, chat_id, &normalized_remaining, None, &state_owned).await;
+                                match fallback {
                                     Ok(_) => {
                                         shared_rate_limit_wait(&state_owned, chat_id).await;
                                         let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                                     }
-                                    Err(e2) => {
-                                        println!("  [{ts}]   ⚠ send_long_message failed (plain): {e2}");
+                                    Err(_) => {
                                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                                        let truncated = truncate_str(&final_response, TELEGRAM_MSG_LIMIT);
-                                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
-                                            .await);
+                                        let truncated = truncate_str(&normalized_remaining, TELEGRAM_MSG_LIMIT);
+                                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
                                     }
                                 }
                             }
@@ -7060,87 +7106,45 @@ async fn handle_text_message(
 
             shared_rate_limit_wait(&state_owned, chat_id).await;
 
-            if is_group_chat {
-                // ── Group chat: show only remaining delta + [Stopped] ──
-                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                let remaining = &full_response[last_confirmed_len..];
-                msg_debug(&format!("[rolling_ph] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
-                    placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-                let display_stopped = if remaining.trim().is_empty() {
-                    "[Stopped]".to_string()
-                } else {
-                    let normalized = normalize_empty_lines(remaining);
-                    format!("{}\n\n[Stopped]", normalized)
-                };
-                let html_stopped = markdown_to_telegram_html(&display_stopped);
-                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                    if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                        .parse_mode(ParseMode::Html).await)
-                    {
-                        let ts_err = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts_err}]   ⚠ edit_message failed (stopped/group HTML): {e}");
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
-                    }
-                } else {
-                    let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
-                    match send_result {
-                        Ok(_) => {
-                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                        }
-                        Err(_) => {
-                            let fallback = send_long_message(&bot_owned, chat_id, &display_stopped, None, &state_owned).await;
-                            match fallback {
-                                Ok(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                }
-                                Err(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let truncated = truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT);
-                                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
-                                }
-                            }
-                        }
-                    }
+            // ── Show only remaining delta + [Stopped] (unified rolling placeholder) ──
+            if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+            let remaining = &full_response[last_confirmed_len..];
+            msg_debug(&format!("[rolling_ph] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
+                placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
+            let display_stopped = if remaining.trim().is_empty() {
+                "[Stopped]".to_string()
+            } else {
+                let normalized = normalize_empty_lines(remaining);
+                format!("{}\n\n[Stopped]", normalized)
+            };
+            let html_stopped = markdown_to_telegram_html(&display_stopped);
+            if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
+                if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                    .parse_mode(ParseMode::Html).await)
+                {
+                    let ts_err = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts_err}]   ⚠ edit_message failed (stopped HTML): {e}");
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
                 }
             } else {
-                // ── Private chat: existing behavior ──
-                let html_stopped = markdown_to_telegram_html(&stopped_response);
-                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                    if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                        .parse_mode(ParseMode::Html)
-                        .await)
-                    {
-                        let ts_err = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts_err}]   ⚠ edit_message failed (stopped/HTML): {e}");
+                let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
+                match send_result {
+                    Ok(_) => {
                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &stopped_response)
-                            .await);
+                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                     }
-                } else {
-                    let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
-                    match send_result {
-                        Ok(_) => {
-                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                        }
-                        Err(e) => {
-                            let ts_err = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts_err}]   ⚠ send_long_message failed (stopped/HTML): {e}");
-                            let fallback = send_long_message(&bot_owned, chat_id, &stopped_response, None, &state_owned).await;
-                            match fallback {
-                                Ok(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                }
-                                Err(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let truncated = truncate_str(&stopped_response, TELEGRAM_MSG_LIMIT);
-                                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
-                                        .await);
-                                }
+                    Err(_) => {
+                        let fallback = send_long_message(&bot_owned, chat_id, &display_stopped, None, &state_owned).await;
+                        match fallback {
+                            Ok(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                            }
+                            Err(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let truncated = truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT);
+                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
                             }
                         }
                     }
@@ -8442,15 +8446,16 @@ async fn execute_schedule(
         let ctx = data.settings.context.get(&chat_id.0.to_string()).copied().unwrap_or(12);
         (data.settings.instructions.get(&chat_id.0.to_string()).cloned(), ctx, data.bot_username.clone(), data.bot_display_name.clone())
     };
+    let platform = capitalize_platform(detect_platform(token));
     let sched_role = {
         let base = format!(
-            "You are executing a scheduled task through Telegram.\n\
+            "You are executing a scheduled task through {}.\n\
              Project directory: {project_path}\n\
              Your current working directory is a dedicated workspace for this schedule.\n\
              This workspace will be preserved after execution. The user can continue work here via /start.\n\
              To work with project files, use absolute paths to the project directory.\n\
              Any files you want to deliver must be sent via the \"{}\" --sendfile command before the task ends.",
-            shell_bin_path()
+            platform, shell_bin_path()
         );
         match &sched_instruction {
             Some(instr) => format!("{}\n\nUser's instruction for this chat:\n{}", base, instr),
@@ -8463,7 +8468,7 @@ async fn execute_schedule(
         None, // scheduled tasks don't need to register further schedules with session context
         &sched_bot_username, &sched_bot_display_name,
         None, // scheduled tasks: no user message dedup
-        sched_context_count,
+        sched_context_count, &platform,
     );
 
     // Retrieve pre-inserted cancel token (from scheduler_loop), or create a new one
@@ -8578,7 +8583,6 @@ async fn execute_schedule(
         let mut suppress_tool_display = false;
         let mut last_tool_name: String = String::new();
         let mut exec_session_id: Option<String> = None;
-        let is_group_chat = chat_id.0 < 0;
         let mut placeholder_msg_id = placeholder_msg_id;
         let mut last_confirmed_len: usize = 0;
 
@@ -8726,14 +8730,13 @@ async fn execute_schedule(
             }
 
             // Update placeholder with progress
-            if is_group_chat && !done {
-                // ── Group chat: rolling placeholder pattern ──
+            if !done {
+                // ── Rolling placeholder pattern (unified for all chats) ──
                 if full_response.len() > last_confirmed_len {
                     let delta = &full_response[last_confirmed_len..];
                     let normalized_delta = normalize_empty_lines(delta);
                     let html_delta = markdown_to_telegram_html(&normalized_delta);
                     if html_delta.trim().is_empty() {
-                        // Delta is whitespace-only after normalization — skip edit, just update position
                         msg_debug(&format!("[rolling_ph/sched] SKIP empty delta: placeholder_msg_id={}, delta_bytes={}, confirmed={}→{}",
                             placeholder_msg_id, delta.len(), last_confirmed_len, full_response.len()));
                         last_confirmed_len = full_response.len();
@@ -8745,7 +8748,6 @@ async fn execute_schedule(
                             let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_delta)
                                 .parse_mode(ParseMode::Html).await);
                         } else {
-                            // Delta too large for single edit — send via send_long_message
                             if send_long_message(&bot_owned, chat_id, &html_delta, Some(ParseMode::Html), &state_owned).await.is_ok() {
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
@@ -8764,7 +8766,7 @@ async fn execute_schedule(
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚠ new placeholder failed (group/schedule): {e}");
+                                println!("  [{ts}]   ⚠ new placeholder failed (schedule): {e}");
                                 msg_debug(&format!("[rolling_ph/sched] NEW placeholder FAILED: keeping msg_id={}, err={}", placeholder_msg_id, e));
                             }
                         }
@@ -8785,30 +8787,6 @@ async fn execute_schedule(
                         shared_rate_limit_wait(&state_owned, chat_id).await;
                         let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                     }
-                }
-            } else if !done {
-                // ── Private chat: existing behavior ──
-                let indicator = SPINNER[spin_idx % SPINNER.len()];
-                spin_idx += 1;
-
-                let display_text = if full_response.is_empty() {
-                    format!("⏰ {}\n\n{}", entry_clone.prompt, indicator)
-                } else {
-                    let normalized = normalize_empty_lines(&full_response);
-                    let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 40);
-                    format!("⏰ {}\n\n{}\n\n{}", entry_clone.prompt, truncated, indicator)
-                };
-
-                if display_text != last_edit_text {
-                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                    let html_text = markdown_to_telegram_html(&display_text);
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
-                        .parse_mode(ParseMode::Html)
-                        .await);
-                    last_edit_text = display_text;
-                } else {
-                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                    let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                 }
             }
 
@@ -8836,22 +8814,16 @@ async fn execute_schedule(
             }
 
             shared_rate_limit_wait(&state_owned, chat_id).await;
-            if is_group_chat {
-                // ── Group chat: show remaining delta + stopped ──
-                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                let remaining = &full_response[last_confirmed_len..];
-                let display_stopped = if remaining.trim().is_empty() {
-                    format!("⛔ Stopped\n\nUse /{} to continue this schedule session.", schedule_id)
-                } else {
-                    let normalized = normalize_empty_lines(remaining);
-                    format!("{}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", normalized, schedule_id)
-                };
-                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
+            // ── Show remaining delta + stopped (unified rolling placeholder) ──
+            if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+            let remaining = &full_response[last_confirmed_len..];
+            let display_stopped = if remaining.trim().is_empty() {
+                format!("⛔ Stopped\n\nUse /{} to continue this schedule session.", schedule_id)
             } else {
-                // ── Private chat: existing behavior ──
-                let stopped_text = format!("⏰ {}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", entry_clone.prompt, schedule_id);
-                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, stopped_text).await);
-            }
+                let normalized = normalize_empty_lines(remaining);
+                format!("{}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", normalized, schedule_id)
+            };
+            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ■ [Schedule] Stopped");
@@ -8862,60 +8834,22 @@ async fn execute_schedule(
 
             shared_rate_limit_wait(&state_owned, chat_id).await;
 
-            if is_group_chat {
-                // ── Group chat: send only remaining delta ──
-                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                let remaining = &full_response[last_confirmed_len..];
-                msg_debug(&format!("[rolling_ph/sched] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
-                    placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
-                if remaining.trim().is_empty() {
-                    // No new content — delete spinner placeholder
-                    msg_debug(&format!("[rolling_ph/sched] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
-                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                } else {
-                    let normalized_remaining = normalize_empty_lines(remaining);
-                    let final_text = format!("{}\n\nUse /{} to continue this schedule session.", normalized_remaining, schedule_id);
-                    let html_response = markdown_to_telegram_html(&final_text);
-                    msg_debug(&format!("[rolling_ph/sched] FINAL EDIT placeholder: msg_id={}, html_len={}", placeholder_msg_id, html_response.len()));
-                    if html_response.len() <= TELEGRAM_MSG_LIMIT {
-                        if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
-                            .parse_mode(ParseMode::Html).await)
-                        {
-                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_text).await);
-                        }
-                    } else {
-                        let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
-                        match send_result {
-                            Ok(_) => {
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                            }
-                            Err(_) => {
-                                let fallback = send_long_message(&bot_owned, chat_id, &final_text, None, &state_owned).await;
-                                match fallback {
-                                    Ok(_) => {
-                                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                    }
-                                    Err(_) => {
-                                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                                        let truncated = truncate_str(&final_text, TELEGRAM_MSG_LIMIT);
-                                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            // ── Send only remaining delta (unified rolling placeholder) ──
+            if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+            let remaining = &full_response[last_confirmed_len..];
+            msg_debug(&format!("[rolling_ph/sched] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
+                placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
+            if remaining.trim().is_empty() {
+                msg_debug(&format!("[rolling_ph/sched] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
             } else {
-                // ── Private chat: existing behavior ──
-                let final_text = format!("⏰ {}\n\n{}\n\nUse /{} to continue this schedule session.", entry_clone.prompt, normalize_empty_lines(&full_response), schedule_id);
+                let normalized_remaining = normalize_empty_lines(remaining);
+                let final_text = format!("{}\n\nUse /{} to continue this schedule session.", normalized_remaining, schedule_id);
                 let html_response = markdown_to_telegram_html(&final_text);
+                msg_debug(&format!("[rolling_ph/sched] FINAL EDIT placeholder: msg_id={}, html_len={}", placeholder_msg_id, html_response.len()));
                 if html_response.len() <= TELEGRAM_MSG_LIMIT {
                     if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
-                        .parse_mode(ParseMode::Html)
-                        .await)
+                        .parse_mode(ParseMode::Html).await)
                     {
                         shared_rate_limit_wait(&state_owned, chat_id).await;
                         let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_text).await);
@@ -9210,14 +9144,15 @@ async fn process_bot_message(
 
     // Build system prompt
     let bot_key = token_hash(token);
+    let platform = capitalize_platform(detect_platform(token));
     let role = match &instruction {
         Some(instr) => {
             msg_debug(&format!("[process_bot_message] instruction present, len={}", instr.len()));
-            format!("You are chatting with a user through Telegram.\n\nUser's instruction for this chat:\n{}", instr)
+            format!("You are chatting with a user through {}.\n\nUser's instruction for this chat:\n{}", platform, instr)
         }
         None => {
             msg_debug("[process_bot_message] no instruction set");
-            "You are chatting with a user through Telegram.".to_string()
+            format!("You are chatting with a user through {}.", platform)
         }
     };
     let system_prompt_owned = build_system_prompt(
@@ -9225,7 +9160,7 @@ async fn process_bot_message(
         &current_path, chat_id.0, &bot_key, &disabled_notice,
         session_id.as_deref(), bot_username, bot_display_name,
         None, // bot-to-bot messages: no user message dedup
-        context_count,
+        context_count, &platform,
     );
     msg_debug(&format!("[process_bot_message] system_prompt built, len={}", system_prompt_owned.len()));
 
@@ -9374,7 +9309,6 @@ async fn process_bot_message(
         let mut pending_cokacdir = false;
         let mut suppress_tool_display = false;
         let mut last_tool_name: String = String::new();
-        let is_group_chat = chat_id.0 < 0;
         let mut placeholder_msg_id = placeholder_msg_id;
         let mut last_confirmed_len: usize = 0;
 
@@ -9529,23 +9463,21 @@ async fn process_bot_message(
                     }
                 }
 
-                if is_group_chat && !done {
-                    // ── Group chat: rolling placeholder pattern ──
+                if !done {
+                    // ── Rolling placeholder pattern (unified for all chats) ──
                     if full_response.len() > last_confirmed_len {
                         let delta = &full_response[last_confirmed_len..];
                         let normalized_delta = normalize_empty_lines(delta);
                         let html_delta = markdown_to_telegram_html(&normalized_delta);
                         if html_delta.trim().is_empty() {
-                            // Delta is whitespace-only after normalization — skip edit, just update position
                             last_confirmed_len = full_response.len();
                         } else {
-                            msg_debug(&format!("[botmsg_poll:{}] group: finalizing placeholder with delta_len={}", bmsg_id_for_log, normalized_delta.len()));
+                            msg_debug(&format!("[botmsg_poll:{}] finalizing placeholder with delta_len={}", bmsg_id_for_log, normalized_delta.len()));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             if html_delta.len() <= TELEGRAM_MSG_LIMIT {
                                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_delta)
                                     .parse_mode(ParseMode::Html).await);
                             } else {
-                                // Delta too large for single edit — send via send_long_message
                                 if send_long_message(&bot_owned, chat_id, &html_delta, Some(ParseMode::Html), &state_owned).await.is_ok() {
                                     shared_rate_limit_wait(&state_owned, chat_id).await;
                                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
@@ -9560,7 +9492,7 @@ async fn process_bot_message(
                                 Ok(new_ph) => { placeholder_msg_id = new_ph.id; }
                                 Err(e) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}]   ⚠ new placeholder failed (group/botmsg): {e}");
+                                    println!("  [{ts}]   ⚠ new placeholder failed (botmsg): {e}");
                                 }
                             }
                             last_edit_text.clear();
@@ -9571,7 +9503,7 @@ async fn process_bot_message(
                         spin_idx += 1;
                         let display_text = indicator.to_string();
                         if display_text != last_edit_text {
-                            msg_debug(&format!("[botmsg_poll:{}] group: spinner update spin_idx={}", bmsg_id_for_log, spin_idx));
+                            msg_debug(&format!("[botmsg_poll:{}] spinner update spin_idx={}", bmsg_id_for_log, spin_idx));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             let html_text = markdown_to_telegram_html(&display_text);
                             let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
@@ -9581,32 +9513,6 @@ async fn process_bot_message(
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                         }
-                    }
-                } else if !done {
-                    // ── Private chat: existing behavior ──
-                    let indicator = SPINNER[spin_idx % SPINNER.len()];
-                    spin_idx += 1;
-
-                    let display_text = if full_response.is_empty() {
-                        indicator.to_string()
-                    } else {
-                        let normalized = normalize_empty_lines(&full_response);
-                        let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 20);
-                        format!("{}\n\n{}", truncated, indicator)
-                    };
-
-                    if display_text != last_edit_text {
-                        msg_debug(&format!("[botmsg_poll:{}] updating placeholder: spin_idx={}, display_len={}", bmsg_id_for_log, spin_idx, display_text.len()));
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let html_text = markdown_to_telegram_html(&display_text);
-                        let edit_result = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
-                            .parse_mode(ParseMode::Html)
-                            .await);
-                        msg_debug(&format!("[botmsg_poll:{}] edit_message result: ok={}", bmsg_id_for_log, edit_result.is_ok()));
-                        last_edit_text = display_text;
-                    } else {
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
                     }
                 }
             }
@@ -9627,89 +9533,45 @@ async fn process_bot_message(
                 msg_debug(&format!("[botmsg_poll:{}] final: response_len={}, msg_limit={}",
                     bmsg_id_for_log, final_response.len(), TELEGRAM_MSG_LIMIT));
 
-                if is_group_chat {
-                    // ── Group chat: send only remaining delta ──
-                    if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                    let remaining = &full_response[last_confirmed_len..];
-                    msg_debug(&format!("[rolling_ph/botmsg] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
-                        placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
-                    if remaining.trim().is_empty() {
-                        msg_debug(&format!("[rolling_ph/botmsg] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
-                        shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                    } else {
-                        let normalized_remaining = normalize_empty_lines(remaining);
-                        let html_remaining = markdown_to_telegram_html(&normalized_remaining);
-                        msg_debug(&format!("[botmsg_poll:{}] group: final delta_len={}, html_len={}",
-                            bmsg_id_for_log, normalized_remaining.len(), html_remaining.len()));
-                        if html_remaining.len() <= TELEGRAM_MSG_LIMIT {
-                            if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_remaining)
-                                .parse_mode(ParseMode::Html).await)
-                            {
-                                msg_debug(&format!("[botmsg_poll:{}] group: HTML edit failed: {}", bmsg_id_for_log, e));
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &normalized_remaining).await);
-                            }
-                        } else {
-                            let send_result = send_long_message(&bot_owned, chat_id, &html_remaining, Some(ParseMode::Html), &state_owned).await;
-                            match send_result {
-                                Ok(_) => {
-                                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                }
-                                Err(_) => {
-                                    let fallback = send_long_message(&bot_owned, chat_id, &normalized_remaining, None, &state_owned).await;
-                                    match fallback {
-                                        Ok(_) => {
-                                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                                        }
-                                        Err(_) => {
-                                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                                            let truncated = truncate_str(&normalized_remaining, TELEGRAM_MSG_LIMIT);
-                                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // ── Send only remaining delta (unified rolling placeholder) ──
+                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+                let remaining = &full_response[last_confirmed_len..];
+                msg_debug(&format!("[rolling_ph/botmsg] FINAL: placeholder_msg_id={}, confirmed={}, total={}, remaining_len={}",
+                    placeholder_msg_id, last_confirmed_len, full_response.len(), remaining.trim().len()));
+                if remaining.trim().is_empty() {
+                    msg_debug(&format!("[rolling_ph/botmsg] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                 } else {
-                    // ── Private chat: existing behavior ──
-                    let html_response = markdown_to_telegram_html(&final_response);
-                    msg_debug(&format!("[botmsg_poll:{}] html_len={}", bmsg_id_for_log, html_response.len()));
-                    if html_response.len() <= TELEGRAM_MSG_LIMIT {
-                        msg_debug(&format!("[botmsg_poll:{}] sending as single edit (HTML)", bmsg_id_for_log));
-                        if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
-                            .parse_mode(ParseMode::Html)
-                            .await)
+                    let normalized_remaining = normalize_empty_lines(remaining);
+                    let html_remaining = markdown_to_telegram_html(&normalized_remaining);
+                    msg_debug(&format!("[botmsg_poll:{}] final delta_len={}, html_len={}",
+                        bmsg_id_for_log, normalized_remaining.len(), html_remaining.len()));
+                    if html_remaining.len() <= TELEGRAM_MSG_LIMIT {
+                        if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_remaining)
+                            .parse_mode(ParseMode::Html).await)
                         {
-                            msg_debug(&format!("[botmsg_poll:{}] HTML edit failed: {}, retrying plain text", bmsg_id_for_log, e));
+                            msg_debug(&format!("[botmsg_poll:{}] HTML edit failed: {}", bmsg_id_for_log, e));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_response).await);
+                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &normalized_remaining).await);
                         }
                     } else {
-                        msg_debug(&format!("[botmsg_poll:{}] response exceeds limit, using send_long_message", bmsg_id_for_log));
-                        let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
+                        let send_result = send_long_message(&bot_owned, chat_id, &html_remaining, Some(ParseMode::Html), &state_owned).await;
                         match send_result {
                             Ok(_) => {
-                                msg_debug(&format!("[botmsg_poll:{}] send_long_message (HTML) ok, deleting placeholder", bmsg_id_for_log));
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                             }
-                            Err(e) => {
-                                msg_debug(&format!("[botmsg_poll:{}] send_long_message (HTML) failed: {}, trying plain text", bmsg_id_for_log, e));
-                                let fallback = send_long_message(&bot_owned, chat_id, &final_response, None, &state_owned).await;
+                            Err(_) => {
+                                let fallback = send_long_message(&bot_owned, chat_id, &normalized_remaining, None, &state_owned).await;
                                 match fallback {
                                     Ok(_) => {
-                                        msg_debug(&format!("[botmsg_poll:{}] send_long_message (plain) ok, deleting placeholder", bmsg_id_for_log));
                                         shared_rate_limit_wait(&state_owned, chat_id).await;
                                         let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                                     }
-                                    Err(e2) => {
-                                        msg_debug(&format!("[botmsg_poll:{}] send_long_message (plain) also failed: {}, truncating", bmsg_id_for_log, e2));
+                                    Err(_) => {
                                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                                        let truncated = truncate_str(&final_response, TELEGRAM_MSG_LIMIT);
+                                        let truncated = truncate_str(&normalized_remaining, TELEGRAM_MSG_LIMIT);
                                         let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
                                     }
                                 }
@@ -9818,37 +9680,24 @@ async fn process_bot_message(
 
             shared_rate_limit_wait(&state_owned, chat_id).await;
 
-            if is_group_chat {
-                // ── Group chat: show only remaining delta + [Stopped] ──
-                if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
-                let remaining = &full_response[last_confirmed_len..];
-                msg_debug(&format!("[rolling_ph/botmsg] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
-                    placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-                let display_stopped = if remaining.trim().is_empty() {
-                    "[Stopped]".to_string()
-                } else {
-                    let normalized = normalize_empty_lines(remaining);
-                    format!("{}\n\n[Stopped]", normalized)
-                };
-                let html_stopped = markdown_to_telegram_html(&display_stopped);
-                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                        .parse_mode(ParseMode::Html).await);
-                } else {
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id,
-                        &truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT)).await);
-                }
+            // ── Show remaining delta + [Stopped] (unified rolling placeholder) ──
+            if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
+            let remaining = &full_response[last_confirmed_len..];
+            msg_debug(&format!("[rolling_ph/botmsg] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
+                placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
+            let display_stopped = if remaining.trim().is_empty() {
+                "[Stopped]".to_string()
             } else {
-                // ── Private chat: existing behavior ──
-                let html_stopped = markdown_to_telegram_html(&stopped_response);
-                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                        .parse_mode(ParseMode::Html)
-                        .await);
-                } else {
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id,
-                        &truncate_str(&stopped_response, TELEGRAM_MSG_LIMIT)).await);
-                }
+                let normalized = normalize_empty_lines(remaining);
+                format!("{}\n\n[Stopped]", normalized)
+            };
+            let html_stopped = markdown_to_telegram_html(&display_stopped);
+            if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                    .parse_mode(ParseMode::Html).await);
+            } else {
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id,
+                    &truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT)).await);
             }
 
             // Do NOT create response file on cancel → chain broken

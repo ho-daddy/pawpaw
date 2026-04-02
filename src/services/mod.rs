@@ -5,6 +5,7 @@ pub mod codex;
 pub mod gemini;
 pub mod opencode;
 pub mod bridge;
+pub mod messenger_bridge;
 pub mod remote;
 pub mod remote_transfer;
 pub mod dedup;

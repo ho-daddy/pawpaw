@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "filesystem"]
 [dependencies]
 ratatui = { version = "0.28", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
@@ -41,6 +41,7 @@ async-trait = "0.1"
 ratatui-image = { version = "2.0", default-features = false, features = ["rustix", "image-defaults", "crossterm"] }
 teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "builder", "cache", "rustls_backend"] }
 fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
