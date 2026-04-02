@@ -1763,6 +1763,9 @@ async fn auto_create_workspace_session(
 
 /// Telegram message length limit
 const TELEGRAM_MSG_LIMIT: usize = 4096;
+/// Threshold for switching to file attachment mode: responses above this size
+/// are sent as a .txt file instead of multiple messages
+const FILE_ATTACH_THRESHOLD: usize = TELEGRAM_MSG_LIMIT * 2;
 /// Maximum number of messages that can be queued per chat in queue mode
 const MAX_QUEUE_SIZE: usize = 20;
 /// Default queue mode state for chats without explicit setting
@@ -6758,7 +6761,10 @@ async fn handle_text_message(
                                         content.len(), truncate_str(&content, 80)));
                                     ai_trace(&format!("[STREAM] Text: {} chars, total_so_far={}", content.len(), full_response.len() + content.len()));
                                     raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: content.clone() });
+                                    let _fr_before = full_response.len();
                                     full_response.push_str(&content);
+                                    msg_debug(&format!("[fr_trace][{}] +Text: added={}, preview={:?}, total={} (was {})",
+                                        chat_id.0, content.len(), truncate_str(&content, 200), full_response.len(), _fr_before));
                                 }
                                 StreamMessage::ToolUse { name, input } => {
                                     pending_cokacdir = detect_cokacdir_command(&name, &input);
@@ -6771,14 +6777,20 @@ async fn handle_text_message(
                                         name, truncate_str(&input, 200), pending_cokacdir, silent_mode, full_response.len(), full_response.ends_with('\n')));
                                     raw_entries.push(RawPayloadEntry { tag: "ToolUse".into(), content: format!("{}: {}", name, input) });
                                     if !pending_cokacdir && !silent_mode {
+                                        let _fr_before = full_response.len();
                                         if name == "Bash" {
                                             full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolUse/Bash: added={}, cmd={:?}, total={} (was {})",
+                                                chat_id.0, full_response.len() - _fr_before, truncate_str(&input, 100), full_response.len(), _fr_before));
                                         } else {
                                             full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolUse/{}: added={}, summary={:?}, total={} (was {})",
+                                                chat_id.0, name, full_response.len() - _fr_before, truncate_str(&summary, 100), full_response.len(), _fr_before));
                                         }
                                     } else if !pending_cokacdir && silent_mode && !full_response.is_empty() && !full_response.ends_with('\n') {
                                         msg_debug(&format!("[polling] silent mode: inserting \\n\\n after tool_use={}", name));
                                         full_response.push_str("\n\n");
+                                        msg_debug(&format!("[fr_trace][{}] +ToolUse/silent_nl: added=2, total={}", chat_id.0, full_response.len()));
                                     } else if silent_mode {
                                         msg_debug(&format!("[polling] silent mode: skipped \\n\\n (pending_cokacdir={}, empty={}, ends_nl={})",
                                             pending_cokacdir, full_response.is_empty(), full_response.ends_with('\n')));
@@ -6790,15 +6802,21 @@ async fn handle_text_message(
                                         msg_debug(&format!("[polling] ToolResult ERROR: last_tool={}, content_preview={:?}", last_tool_name, truncate_str(&content, 300)));
                                     }
                                     raw_entries.push(RawPayloadEntry { tag: "ToolResult".into(), content: format!("is_error={}, content={}", is_error, content) });
+                                    let _fr_before = full_response.len();
                                     if std::mem::take(&mut pending_cokacdir) {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         if std::mem::take(&mut suppress_tool_display) {
                                             println!("  [{ts}]   ↩ cokacdir (chat_log, suppressed)");
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir_suppressed: added=0, total={}", chat_id.0, full_response.len()));
                                         } else {
                                             println!("  [{ts}]   ↩ cokacdir: {content}");
                                             let formatted = format_cokacdir_result(&content);
                                             if !formatted.is_empty() {
                                                 full_response.push_str(&format!("\n{}\n", formatted));
+                                                msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: added={}, preview={:?}, total={} (was {})",
+                                                    chat_id.0, full_response.len() - _fr_before, truncate_str(&formatted, 200), full_response.len(), _fr_before));
+                                            } else {
+                                                msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: formatted_empty, added=0, total={}", chat_id.0, full_response.len()));
                                             }
                                         }
                                     } else if is_error && !silent_mode {
@@ -6810,9 +6828,13 @@ async fn handle_text_message(
                                         } else {
                                             full_response.push_str(&format!("\n`{}`\n\n", truncated));
                                         }
+                                        msg_debug(&format!("[fr_trace][{}] +ToolResult/error({}): added={}, preview={:?}, total={} (was {})",
+                                            chat_id.0, last_tool_name, full_response.len() - _fr_before, truncate_str(&truncated, 200), full_response.len(), _fr_before));
                                     } else if !silent_mode {
                                         if last_tool_name == "Read" {
                                             full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/Read: added={}, content_bytes={}, total={} (was {})",
+                                                chat_id.0, full_response.len() - _fr_before, content.len(), full_response.len(), _fr_before));
                                         } else if !content.is_empty() {
                                             let truncated = truncate_str(&content, 300);
                                             if truncated.contains('\n') {
@@ -6820,13 +6842,22 @@ async fn handle_text_message(
                                             } else {
                                                 full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
                                             }
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): added={}, raw_content_len={}, preview={:?}, total={} (was {})",
+                                                chat_id.0, last_tool_name, full_response.len() - _fr_before, content.len(), truncate_str(&truncated, 200), full_response.len(), _fr_before));
+                                        } else {
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): content_empty, added=0, total={}", chat_id.0, last_tool_name, full_response.len()));
                                         }
+                                    } else {
+                                        msg_debug(&format!("[fr_trace][{}] +ToolResult/silent: skipped, last_tool={}, content_len={}, total={}", chat_id.0, last_tool_name, content.len(), full_response.len()));
                                     }
                                 }
                                 StreamMessage::TaskNotification { summary, .. } => {
                                     if !summary.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
+                                        let _fr_before = full_response.len();
                                         full_response.push_str(&format!("\n[Task: {}]\n", summary));
+                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
+                                            chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
                                     }
                                 }
                                 StreamMessage::Done { result, session_id: sid } => {
@@ -6836,6 +6867,11 @@ async fn handle_text_message(
                                     if !result.is_empty() && full_response.is_empty() {
                                         msg_debug(&format!("[polling] Done: fallback full_response = result ({})", result.len()));
                                         full_response = result.clone();
+                                        msg_debug(&format!("[fr_trace][{}] +Done/fallback: set={}, preview={:?}, total={}",
+                                            chat_id.0, result.len(), truncate_str(&full_response, 200), full_response.len()));
+                                    } else if !result.is_empty() {
+                                        msg_debug(&format!("[fr_trace][{}] Done/discarded: result_len={} discarded (full_response already has {})",
+                                            chat_id.0, result.len(), full_response.len()));
                                     }
                                     if !result.is_empty() && raw_entries.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: result });
@@ -6843,6 +6879,7 @@ async fn handle_text_message(
                                     if let Some(s) = sid {
                                         new_session_id = Some(s);
                                     }
+                                    msg_debug(&format!("[fr_trace][{}] =DONE: final_total={}", chat_id.0, full_response.len()));
                                     done = true;
                                 }
                                 StreamMessage::Error { message, stdout, stderr, exit_code } => {
@@ -6859,6 +6896,8 @@ async fn handle_text_message(
                                         "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
                                         message, code_display, stdout_display, stderr_display
                                     );
+                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
+                                        chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
                                     raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
                                     done = true;
                                 }
@@ -6875,16 +6914,18 @@ async fn handle_text_message(
 
                 if !done {
                     // ── Rolling placeholder pattern (unified for all chats) ──
-                    if full_response.len() > last_confirmed_len {
+                    if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
                         // New content arrived — finalize current placeholder with delta
-                        let delta = &full_response[last_confirmed_len..];
+                        // Cap delta to threshold boundary to prevent message flood
+                        let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                        let delta = &full_response[last_confirmed_len..delta_end];
                         let normalized_delta = normalize_empty_lines(delta);
                         let html_delta = markdown_to_telegram_html(&normalized_delta);
                         if html_delta.trim().is_empty() {
                             // Delta is whitespace-only after normalization — skip edit, just update position
                             msg_debug(&format!("[rolling_ph] SKIP empty delta: placeholder_msg_id={}, delta_bytes={}, confirmed={}→{}",
-                                placeholder_msg_id, delta.len(), last_confirmed_len, full_response.len()));
-                            last_confirmed_len = full_response.len();
+                                placeholder_msg_id, delta.len(), last_confirmed_len, delta_end));
+                            last_confirmed_len = delta_end;
                         } else {
                             msg_debug(&format!("[rolling_ph] EDIT delta: placeholder_msg_id={}, delta_len={}, html_len={}, confirmed={}→{}",
                                 placeholder_msg_id, normalized_delta.len(), html_delta.len(), last_confirmed_len, full_response.len()));
@@ -6902,7 +6943,7 @@ async fn handle_text_message(
                                     let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated_delta).await);
                                 }
                             }
-                            last_confirmed_len = full_response.len();
+                            last_confirmed_len = delta_end;
                             // Create new placeholder for next cycle
                             let old_ph_id = placeholder_msg_id;
                             shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -6959,6 +7000,7 @@ async fn handle_text_message(
                 if full_response.is_empty() {
                     ai_trace(&format!("[FINAL] full_response is EMPTY → (No response). cancelled={}, last_confirmed_len={}", cancelled, last_confirmed_len));
                     full_response = "(No response)".to_string();
+                    msg_debug(&format!("[fr_trace][{}] =NoResponse: set to '(No response)', cancelled={}", chat_id.0, cancelled));
                 } else {
                     ai_trace(&format!("[FINAL] full_response_len={}, last_confirmed_len={}, remaining_len={}",
                         full_response.len(), last_confirmed_len, full_response.len().saturating_sub(last_confirmed_len)));
@@ -6976,6 +7018,12 @@ async fn handle_text_message(
                     msg_debug(&format!("[rolling_ph] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+                    // Response too large — send as file attachment
+                    msg_debug(&format!("[rolling_ph] FINAL FILE ATTACH: total={}", full_response.len()));
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file").await);
+                    send_response_as_file(&bot_owned, chat_id, &final_response, &state_owned, "response").await;
                 } else {
                     let normalized_remaining = normalize_empty_lines(remaining);
                     let html_remaining = markdown_to_telegram_html(&normalized_remaining);
@@ -7112,40 +7160,48 @@ async fn handle_text_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            let display_stopped = if remaining.trim().is_empty() {
-                "[Stopped]".to_string()
+            if full_response.len() > FILE_ATTACH_THRESHOLD {
+                // Large stopped response — send as file
+                msg_debug(&format!("[rolling_ph] STOPPED FILE ATTACH: total={}", full_response.len()));
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file [Stopped]").await);
+                send_response_as_file(&bot_owned, chat_id, &stopped_response, &state_owned, "response").await;
             } else {
-                let normalized = normalize_empty_lines(remaining);
-                format!("{}\n\n[Stopped]", normalized)
-            };
-            let html_stopped = markdown_to_telegram_html(&display_stopped);
-            if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                    .parse_mode(ParseMode::Html).await)
-                {
-                    let ts_err = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts_err}]   ⚠ edit_message failed (stopped HTML): {e}");
-                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
-                }
-            } else {
-                let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
-                match send_result {
-                    Ok(_) => {
+                let display_stopped = if remaining.trim().is_empty() {
+                    "[Stopped]".to_string()
+                } else {
+                    let normalized = normalize_empty_lines(remaining);
+                    format!("{}\n\n[Stopped]", normalized)
+                };
+                let html_stopped = markdown_to_telegram_html(&display_stopped);
+                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
+                    if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                        .parse_mode(ParseMode::Html).await)
+                    {
+                        let ts_err = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts_err}]   ⚠ edit_message failed (stopped HTML): {e}");
                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
                     }
-                    Err(_) => {
-                        let fallback = send_long_message(&bot_owned, chat_id, &display_stopped, None, &state_owned).await;
-                        match fallback {
-                            Ok(_) => {
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                            }
-                            Err(_) => {
-                                shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let truncated = truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT);
-                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
+                } else {
+                    let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
+                    match send_result {
+                        Ok(_) => {
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                        }
+                        Err(_) => {
+                            let fallback = send_long_message(&bot_owned, chat_id, &display_stopped, None, &state_owned).await;
+                            match fallback {
+                                Ok(_) => {
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                                }
+                                Err(_) => {
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let truncated = truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT);
+                                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
+                                }
                             }
                         }
                     }
@@ -7619,6 +7675,32 @@ async fn send_long_message(
     }
 
     Ok(())
+}
+
+/// Send a large AI response as a .txt file attachment.
+/// Returns true if the file was successfully sent.
+async fn send_response_as_file(
+    bot: &Bot,
+    chat_id: ChatId,
+    response: &str,
+    state: &SharedState,
+    label: &str,
+) -> bool {
+    let Some(home) = dirs::home_dir() else { return false };
+    let tmp_dir = home.join(".cokacdir").join("tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let tmp_path = tmp_dir.join(format!("cokacdir_{}_{}.txt", label, timestamp));
+    if std::fs::write(&tmp_path, response).is_err() {
+        return false;
+    }
+    shared_rate_limit_wait(state, chat_id).await;
+    let result = tg!("send_document", bot.send_document(
+        chat_id,
+        teloxide::types::InputFile::file(&tmp_path),
+    ).await);
+    let _ = std::fs::remove_file(&tmp_path);
+    result.is_ok()
 }
 
 /// Normalize consecutive empty lines to maximum of one
@@ -8618,7 +8700,10 @@ async fn execute_schedule(
                                 sched_debug(&format!("[sched] Text: {} chars, preview={:?}",
                                     content.len(), truncate_str(&content, 80)));
                                 raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: content.clone() });
+                                let _fr_before = full_response.len();
                                 full_response.push_str(&content);
+                                sched_debug(&format!("[fr_trace][{}] +Text: added={}, preview={:?}, total={} (was {})",
+                                    chat_id.0, content.len(), truncate_str(&content, 200), full_response.len(), _fr_before));
                             }
                             StreamMessage::ToolUse { name, input } => {
                                 pending_cokacdir = detect_cokacdir_command(&name, &input);
@@ -8631,14 +8716,20 @@ async fn execute_schedule(
                                     name, truncate_str(&input, 200), pending_cokacdir, silent_mode, full_response.len(), full_response.ends_with('\n')));
                                 raw_entries.push(RawPayloadEntry { tag: "ToolUse".into(), content: format!("{}: {}", name, input) });
                                 if !pending_cokacdir && !silent_mode {
+                                    let _fr_before = full_response.len();
                                     if name == "Bash" {
                                         full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
+                                        sched_debug(&format!("[fr_trace][{}] +ToolUse/Bash: added={}, cmd={:?}, total={} (was {})",
+                                            chat_id.0, full_response.len() - _fr_before, truncate_str(&input, 100), full_response.len(), _fr_before));
                                     } else {
                                         full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                        sched_debug(&format!("[fr_trace][{}] +ToolUse/{}: added={}, summary={:?}, total={} (was {})",
+                                            chat_id.0, name, full_response.len() - _fr_before, truncate_str(&summary, 100), full_response.len(), _fr_before));
                                     }
                                 } else if !pending_cokacdir && silent_mode && !full_response.is_empty() && !full_response.ends_with('\n') {
                                     sched_debug(&format!("[schedule_polling] silent mode: inserting \\n\\n after tool_use={}", name));
                                     full_response.push_str("\n\n");
+                                    sched_debug(&format!("[fr_trace][{}] +ToolUse/silent_nl: added=2, total={}", chat_id.0, full_response.len()));
                                 } else if silent_mode {
                                     sched_debug(&format!("[schedule_polling] silent mode: skipped \\n\\n (pending_cokacdir={}, empty={}, ends_nl={})",
                                         pending_cokacdir, full_response.is_empty(), full_response.ends_with('\n')));
@@ -8650,15 +8741,21 @@ async fn execute_schedule(
                                     sched_debug(&format!("[schedule_polling] ToolResult ERROR: last_tool={}, content_preview={:?}", last_tool_name, truncate_str(&content, 300)));
                                 }
                                 raw_entries.push(RawPayloadEntry { tag: "ToolResult".into(), content: format!("is_error={}, content={}", is_error, content) });
+                                let _fr_before = full_response.len();
                                 if std::mem::take(&mut pending_cokacdir) {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     if std::mem::take(&mut suppress_tool_display) {
                                         println!("  [{ts}]   ↩ [Schedule] cokacdir (chat_log, suppressed)");
+                                        sched_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir_suppressed: added=0, total={}", chat_id.0, full_response.len()));
                                     } else {
                                         println!("  [{ts}]   ↩ [Schedule] cokacdir: {content}");
                                         let formatted = format_cokacdir_result(&content);
                                         if !formatted.is_empty() {
                                             full_response.push_str(&format!("\n{}\n", formatted));
+                                            sched_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: added={}, preview={:?}, total={} (was {})",
+                                                chat_id.0, full_response.len() - _fr_before, truncate_str(&formatted, 200), full_response.len(), _fr_before));
+                                        } else {
+                                            sched_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: formatted_empty, added=0, total={}", chat_id.0, full_response.len()));
                                         }
                                     }
                                 } else if is_error && !silent_mode {
@@ -8668,9 +8765,13 @@ async fn execute_schedule(
                                     } else {
                                         full_response.push_str(&format!("\n`{}`\n\n", truncated));
                                     }
+                                    sched_debug(&format!("[fr_trace][{}] +ToolResult/error({}): added={}, preview={:?}, total={} (was {})",
+                                        chat_id.0, last_tool_name, full_response.len() - _fr_before, truncate_str(&truncated, 200), full_response.len(), _fr_before));
                                 } else if !silent_mode {
                                     if last_tool_name == "Read" {
                                         full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                        sched_debug(&format!("[fr_trace][{}] +ToolResult/Read: added={}, content_bytes={}, total={} (was {})",
+                                            chat_id.0, full_response.len() - _fr_before, content.len(), full_response.len(), _fr_before));
                                     } else if !content.is_empty() {
                                         let truncated = truncate_str(&content, 300);
                                         if truncated.contains('\n') {
@@ -8678,13 +8779,22 @@ async fn execute_schedule(
                                         } else {
                                             full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
                                         }
+                                        sched_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): added={}, raw_content_len={}, preview={:?}, total={} (was {})",
+                                            chat_id.0, last_tool_name, full_response.len() - _fr_before, content.len(), truncate_str(&truncated, 200), full_response.len(), _fr_before));
+                                    } else {
+                                        sched_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): content_empty, added=0, total={}", chat_id.0, last_tool_name, full_response.len()));
                                     }
+                                } else {
+                                    sched_debug(&format!("[fr_trace][{}] +ToolResult/silent: skipped, last_tool={}, content_len={}, total={}", chat_id.0, last_tool_name, content.len(), full_response.len()));
                                 }
                             }
                             StreamMessage::TaskNotification { summary, .. } => {
                                 if !summary.is_empty() {
                                     raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
+                                    let _fr_before = full_response.len();
                                     full_response.push_str(&format!("\n[Task: {}]\n", summary));
+                                    sched_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
+                                        chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
                                 }
                             }
                             StreamMessage::Done { result, session_id } => {
@@ -8693,6 +8803,11 @@ async fn execute_schedule(
                                 if !result.is_empty() && full_response.is_empty() {
                                     sched_debug(&format!("[sched] Done: fallback full_response = result ({})", result.len()));
                                     full_response = result.clone();
+                                    sched_debug(&format!("[fr_trace][{}] +Done/fallback: set={}, preview={:?}, total={}",
+                                        chat_id.0, result.len(), truncate_str(&full_response, 200), full_response.len()));
+                                } else if !result.is_empty() {
+                                    sched_debug(&format!("[fr_trace][{}] Done/discarded: result_len={} discarded (full_response already has {})",
+                                        chat_id.0, result.len(), full_response.len()));
                                 }
                                 if !result.is_empty() && raw_entries.is_empty() {
                                     raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: result });
@@ -8700,6 +8815,7 @@ async fn execute_schedule(
                                 if let Some(sid) = session_id {
                                     exec_session_id = Some(sid);
                                 }
+                                sched_debug(&format!("[fr_trace][{}] =DONE: final_total={}", chat_id.0, full_response.len()));
                                 done = true;
                             }
                             StreamMessage::Error { message, stdout, stderr, exit_code } => {
@@ -8709,12 +8825,12 @@ async fn execute_schedule(
                                     Some(c) => c.to_string(),
                                     None => "(unknown)".to_string(),
                                 };
-                                // Check if this is a result-type error (from parse_stream_message)
-                                // vs a process-level error. Both mean execution didn't complete normally.
                                 full_response = format!(
                                     "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
                                     message, code_display, stdout_display, stderr_display
                                 );
+                                sched_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
+                                    chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
                                 raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
                                 had_error = true;
                                 done = true;
@@ -8733,17 +8849,18 @@ async fn execute_schedule(
             // Update placeholder with progress
             if !done {
                 // ── Rolling placeholder pattern (unified for all chats) ──
-                if full_response.len() > last_confirmed_len {
-                    let delta = &full_response[last_confirmed_len..];
+                if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
+                    let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                    let delta = &full_response[last_confirmed_len..delta_end];
                     let normalized_delta = normalize_empty_lines(delta);
                     let html_delta = markdown_to_telegram_html(&normalized_delta);
                     if html_delta.trim().is_empty() {
                         msg_debug(&format!("[rolling_ph/sched] SKIP empty delta: placeholder_msg_id={}, delta_bytes={}, confirmed={}→{}",
-                            placeholder_msg_id, delta.len(), last_confirmed_len, full_response.len()));
-                        last_confirmed_len = full_response.len();
+                            placeholder_msg_id, delta.len(), last_confirmed_len, delta_end));
+                        last_confirmed_len = delta_end;
                     } else {
                         msg_debug(&format!("[rolling_ph/sched] EDIT delta: placeholder_msg_id={}, delta_len={}, html_len={}, confirmed={}→{}",
-                            placeholder_msg_id, normalized_delta.len(), html_delta.len(), last_confirmed_len, full_response.len()));
+                            placeholder_msg_id, normalized_delta.len(), html_delta.len(), last_confirmed_len, delta_end));
                         shared_rate_limit_wait(&state_owned, chat_id).await;
                         if html_delta.len() <= TELEGRAM_MSG_LIMIT {
                             let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_delta)
@@ -8757,7 +8874,7 @@ async fn execute_schedule(
                                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated_delta).await);
                             }
                         }
-                        last_confirmed_len = full_response.len();
+                        last_confirmed_len = delta_end;
                         let old_ph_id = placeholder_msg_id;
                         shared_rate_limit_wait(&state_owned, chat_id).await;
                         match tg!("send_message", bot_owned.send_message(chat_id, "...").await) {
@@ -8818,19 +8935,27 @@ async fn execute_schedule(
             // ── Show remaining delta + stopped (unified rolling placeholder) ──
             if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
             let remaining = &full_response[last_confirmed_len..];
-            let display_stopped = if remaining.trim().is_empty() {
-                format!("⛔ Stopped\n\nUse /{} to continue this schedule session.", schedule_id)
+            if full_response.len() > FILE_ATTACH_THRESHOLD {
+                let notice = format!("\u{1f4c4} Response attached as file [Stopped]\n\nUse /{} to continue this schedule session.", schedule_id);
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
+                let stopped_content = format!("{}\n\n[Stopped]", normalize_empty_lines(&full_response));
+                send_response_as_file(&bot_owned, chat_id, &stopped_content, &state_owned, "schedule").await;
             } else {
-                let normalized = normalize_empty_lines(remaining);
-                format!("{}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", normalized, schedule_id)
-            };
-            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
+                let display_stopped = if remaining.trim().is_empty() {
+                    format!("⛔ Stopped\n\nUse /{} to continue this schedule session.", schedule_id)
+                } else {
+                    let normalized = normalize_empty_lines(remaining);
+                    format!("{}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", normalized, schedule_id)
+                };
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_stopped).await);
+            }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ■ [Schedule] Stopped");
         } else {
             if full_response.is_empty() {
                 full_response = "(No response)".to_string();
+                sched_debug(&format!("[fr_trace][{}] =NoResponse: set to '(No response)'", chat_id.0));
             }
 
             shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -8843,6 +8968,12 @@ async fn execute_schedule(
             if remaining.trim().is_empty() {
                 msg_debug(&format!("[rolling_ph/sched] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+            } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+                msg_debug(&format!("[rolling_ph/sched] FINAL FILE ATTACH: total={}", full_response.len()));
+                let notice = format!("\u{1f4c4} Response attached as file\n\nUse /{} to continue this schedule session.", schedule_id);
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
+                let final_text = format!("{}\n\nUse /{} to continue this schedule session.", normalize_empty_lines(&full_response), schedule_id);
+                send_response_as_file(&bot_owned, chat_id, &final_text, &state_owned, "schedule").await;
             } else {
                 let normalized_remaining = normalize_empty_lines(remaining);
                 let final_text = format!("{}\n\nUse /{} to continue this schedule session.", normalized_remaining, schedule_id);
@@ -9349,7 +9480,10 @@ async fn process_bot_message(
                                     msg_debug(&format!("[botmsg_poll:{}] Text: chunk_len={}, total_len={}",
                                         bmsg_id_for_log, content.len(), full_response.len() + content.len()));
                                     raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: content.clone() });
+                                    let _fr_before = full_response.len();
                                     full_response.push_str(&content);
+                                    msg_debug(&format!("[fr_trace][{}] +Text: added={}, preview={:?}, total={} (was {})",
+                                        chat_id.0, content.len(), truncate_str(&content, 200), full_response.len(), _fr_before));
                                 }
                                 StreamMessage::ToolUse { name, input } => {
                                     pending_cokacdir = detect_cokacdir_command(&name, &input);
@@ -9362,14 +9496,20 @@ async fn process_bot_message(
                                         bmsg_id_for_log, name, truncate_str(&input, 200), pending_cokacdir, silent_mode, full_response.len(), full_response.ends_with('\n')));
                                     raw_entries.push(RawPayloadEntry { tag: "ToolUse".into(), content: format!("{}: {}", name, input) });
                                     if !pending_cokacdir && !silent_mode {
+                                        let _fr_before = full_response.len();
                                         if name == "Bash" {
                                             full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolUse/Bash: added={}, cmd={:?}, total={} (was {})",
+                                                chat_id.0, full_response.len() - _fr_before, truncate_str(&input, 100), full_response.len(), _fr_before));
                                         } else {
                                             full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolUse/{}: added={}, summary={:?}, total={} (was {})",
+                                                chat_id.0, name, full_response.len() - _fr_before, truncate_str(&summary, 100), full_response.len(), _fr_before));
                                         }
                                     } else if !pending_cokacdir && silent_mode && !full_response.is_empty() && !full_response.ends_with('\n') {
                                         msg_debug(&format!("[botmsg_poll:{}] silent mode: inserting \\n\\n after tool_use={}", bmsg_id_for_log, name));
                                         full_response.push_str("\n\n");
+                                        msg_debug(&format!("[fr_trace][{}] +ToolUse/silent_nl: added=2, total={}", chat_id.0, full_response.len()));
                                     }
                                 }
                                 StreamMessage::ToolResult { content, is_error } => {
@@ -9379,17 +9519,22 @@ async fn process_bot_message(
                                         msg_debug(&format!("[botmsg_poll:{}] ToolResult ERROR: last_tool={}, content_preview={:?}", bmsg_id_for_log, last_tool_name, truncate_str(&content, 300)));
                                     }
                                     raw_entries.push(RawPayloadEntry { tag: "ToolResult".into(), content: format!("is_error={}, content={}", is_error, content) });
+                                    let _fr_before = full_response.len();
                                     if std::mem::take(&mut pending_cokacdir) {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         if std::mem::take(&mut suppress_tool_display) {
                                             println!("  [{ts}]   ↩ [BotMsg] cokacdir (chat_log, suppressed)");
-                                            msg_debug(&format!("[botmsg_poll:{}] chat_log result suppressed", bmsg_id_for_log));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir_suppressed: added=0, total={}", chat_id.0, full_response.len()));
                                         } else {
                                             println!("  [{ts}]   ↩ [BotMsg] cokacdir: {content}");
                                             let formatted = format_cokacdir_result(&content);
                                             msg_debug(&format!("[botmsg_poll:{}] cokacdir result formatted_len={}", bmsg_id_for_log, formatted.len()));
                                             if !formatted.is_empty() {
                                                 full_response.push_str(&format!("\n{}\n", formatted));
+                                                msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: added={}, preview={:?}, total={} (was {})",
+                                                    chat_id.0, full_response.len() - _fr_before, truncate_str(&formatted, 200), full_response.len(), _fr_before));
+                                            } else {
+                                                msg_debug(&format!("[fr_trace][{}] +ToolResult/cokacdir: formatted_empty, added=0, total={}", chat_id.0, full_response.len()));
                                             }
                                         }
                                     } else if is_error && !silent_mode {
@@ -9400,9 +9545,13 @@ async fn process_bot_message(
                                         } else {
                                             full_response.push_str(&format!("\n`{}`\n\n", truncated));
                                         }
+                                        msg_debug(&format!("[fr_trace][{}] +ToolResult/error({}): added={}, preview={:?}, total={} (was {})",
+                                            chat_id.0, last_tool_name, full_response.len() - _fr_before, truncate_str(&truncated, 200), full_response.len(), _fr_before));
                                     } else if !silent_mode {
                                         if last_tool_name == "Read" {
                                             full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/Read: added={}, content_bytes={}, total={} (was {})",
+                                                chat_id.0, full_response.len() - _fr_before, content.len(), full_response.len(), _fr_before));
                                         } else if !content.is_empty() {
                                             let truncated = truncate_str(&content, 300);
                                             if truncated.contains('\n') {
@@ -9410,16 +9559,23 @@ async fn process_bot_message(
                                             } else {
                                                 full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
                                             }
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): added={}, raw_content_len={}, preview={:?}, total={} (was {})",
+                                                chat_id.0, last_tool_name, full_response.len() - _fr_before, content.len(), truncate_str(&truncated, 200), full_response.len(), _fr_before));
+                                        } else {
+                                            msg_debug(&format!("[fr_trace][{}] +ToolResult/{}(normal): content_empty, added=0, total={}", chat_id.0, last_tool_name, full_response.len()));
                                         }
                                     } else {
-                                        msg_debug(&format!("[botmsg_poll:{}] silent mode: skipped tool result display", bmsg_id_for_log));
+                                        msg_debug(&format!("[fr_trace][{}] +ToolResult/silent: skipped, last_tool={}, content_len={}, total={}", chat_id.0, last_tool_name, content.len(), full_response.len()));
                                     }
                                 }
                                 StreamMessage::TaskNotification { summary, .. } => {
                                     msg_debug(&format!("[botmsg_poll:{}] TaskNotification: summary_len={}", bmsg_id_for_log, summary.len()));
                                     if !summary.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
+                                        let _fr_before = full_response.len();
                                         full_response.push_str(&format!("\n[Task: {}]\n", summary));
+                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
+                                            chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
                                     }
                                 }
                                 StreamMessage::Done { result, session_id: sid } => {
@@ -9428,6 +9584,11 @@ async fn process_bot_message(
                                     if !result.is_empty() && full_response.is_empty() {
                                         msg_debug(&format!("[botmsg_poll:{}] Done: fallback full_response = result ({})", bmsg_id_for_log, result.len()));
                                         full_response = result.clone();
+                                        msg_debug(&format!("[fr_trace][{}] +Done/fallback: set={}, preview={:?}, total={}",
+                                            chat_id.0, result.len(), truncate_str(&full_response, 200), full_response.len()));
+                                    } else if !result.is_empty() {
+                                        msg_debug(&format!("[fr_trace][{}] Done/discarded: result_len={} discarded (full_response already has {})",
+                                            chat_id.0, result.len(), full_response.len()));
                                     }
                                     if !result.is_empty() && raw_entries.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "Text".into(), content: result });
@@ -9435,6 +9596,7 @@ async fn process_bot_message(
                                     if let Some(s) = sid {
                                         new_session_id = Some(s);
                                     }
+                                    msg_debug(&format!("[fr_trace][{}] =DONE: final_total={}", chat_id.0, full_response.len()));
                                     done = true;
                                 }
                                 StreamMessage::Error { message, stdout, stderr, exit_code } => {
@@ -9450,6 +9612,8 @@ async fn process_bot_message(
                                         "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
                                         message, code_display, stdout_display, stderr_display
                                     );
+                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
+                                        chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
                                     raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
                                     done = true;
                                 }
@@ -9466,12 +9630,13 @@ async fn process_bot_message(
 
                 if !done {
                     // ── Rolling placeholder pattern (unified for all chats) ──
-                    if full_response.len() > last_confirmed_len {
-                        let delta = &full_response[last_confirmed_len..];
+                    if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
+                        let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                        let delta = &full_response[last_confirmed_len..delta_end];
                         let normalized_delta = normalize_empty_lines(delta);
                         let html_delta = markdown_to_telegram_html(&normalized_delta);
                         if html_delta.trim().is_empty() {
-                            last_confirmed_len = full_response.len();
+                            last_confirmed_len = delta_end;
                         } else {
                             msg_debug(&format!("[botmsg_poll:{}] finalizing placeholder with delta_len={}", bmsg_id_for_log, normalized_delta.len()));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -9487,7 +9652,7 @@ async fn process_bot_message(
                                     let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated_delta).await);
                                 }
                             }
-                            last_confirmed_len = full_response.len();
+                            last_confirmed_len = delta_end;
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             match tg!("send_message", bot_owned.send_message(chat_id, "...").await) {
                                 Ok(new_ph) => { placeholder_msg_id = new_ph.id; }
@@ -9528,6 +9693,7 @@ async fn process_bot_message(
                 if full_response.is_empty() {
                     msg_debug(&format!("[botmsg_poll:{}] empty response, using placeholder text", bmsg_id_for_log));
                     full_response = "(No response)".to_string();
+                    msg_debug(&format!("[fr_trace][{}] =NoResponse: set to '(No response)'", chat_id.0));
                 }
 
                 let final_response = normalize_empty_lines(&full_response);
@@ -9543,6 +9709,11 @@ async fn process_bot_message(
                     msg_debug(&format!("[rolling_ph/botmsg] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+                    msg_debug(&format!("[rolling_ph/botmsg] FINAL FILE ATTACH: total={}", full_response.len()));
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file").await);
+                    send_response_as_file(&bot_owned, chat_id, &final_response, &state_owned, "botmsg").await;
                 } else {
                     let normalized_remaining = normalize_empty_lines(remaining);
                     let html_remaining = markdown_to_telegram_html(&normalized_remaining);
@@ -9686,19 +9857,26 @@ async fn process_bot_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph/botmsg] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            let display_stopped = if remaining.trim().is_empty() {
-                "[Stopped]".to_string()
+            if full_response.len() > FILE_ATTACH_THRESHOLD {
+                msg_debug(&format!("[rolling_ph/botmsg] STOPPED FILE ATTACH: total={}", full_response.len()));
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file [Stopped]").await);
+                send_response_as_file(&bot_owned, chat_id, &stopped_response, &state_owned, "botmsg").await;
             } else {
-                let normalized = normalize_empty_lines(remaining);
-                format!("{}\n\n[Stopped]", normalized)
-            };
-            let html_stopped = markdown_to_telegram_html(&display_stopped);
-            if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
-                    .parse_mode(ParseMode::Html).await);
-            } else {
-                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id,
-                    &truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT)).await);
+                let display_stopped = if remaining.trim().is_empty() {
+                    "[Stopped]".to_string()
+                } else {
+                    let normalized = normalize_empty_lines(remaining);
+                    format!("{}\n\n[Stopped]", normalized)
+                };
+                let html_stopped = markdown_to_telegram_html(&display_stopped);
+                if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                        .parse_mode(ParseMode::Html).await);
+                } else {
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id,
+                        &truncate_str(&display_stopped, TELEGRAM_MSG_LIMIT)).await);
+                }
             }
 
             // Do NOT create response file on cancel → chain broken
