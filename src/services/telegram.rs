@@ -7978,11 +7978,11 @@ fn format_cokacdir_result(content: &str) -> String {
             let trimmed = effective_content.trim();
             let extracted = match (trimmed.find('{'), trimmed.rfind('}')) {
                 (Some(start), Some(end)) if start < end => &trimmed[start..=end],
-                _ => return effective_content.to_string(),
+                _ => return String::new(),
             };
             match serde_json::from_str(extracted) {
                 Ok(v) => v,
-                Err(_) => return effective_content.to_string(),
+                Err(_) => return String::new(),
             }
         }
     };
