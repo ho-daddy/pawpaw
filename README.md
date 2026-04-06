@@ -1,12 +1,40 @@
-# COKACDIR
+# Pawpaw
 
-**Your coding agent, already in use — on Telegram.**
+**A persistent AI agent with soul, memory, and autonomy — powered by CLI.**
 
-cokacdir is **not** an AI agent — it does not include an LLM or reasoning engine. Instead, it delegates tasks to the coding agent you are already using (Claude Code, Codex CLI, Gemini CLI, OpenCode) and lets you control it from Telegram. Just send a message to the bot, and the agent will handle code execution, file editing, shell commands, and real-time streaming of results — from your phone or any device with Telegram installed.
+Pawpaw is a terminal-based personal assistant that controls Claude Code (and other AI coding agents) through direct CLI execution — no API keys, no additional costs. It maintains persistent identity, long-term memory, daily journals, and scheduled tasks across sessions, turning a stateless coding agent into a continuous personal companion.
 
-It runs within each agent’s existing subscription (or free tier), so there are **no additional API costs**.
+Built on [cokacdir](https://github.com/kstost/cokacdir), a Rust terminal file manager.
+
+## What Makes Pawpaw Different
+
+Most AI integrations are stateless — every conversation starts from zero. Pawpaw gives your agent **continuity**:
+
+- **Soul & Identity**: The agent reads `SOUL.md` and `IDENTITY.md` at every session start, maintaining consistent personality and behavior
+- **User Memory**: `USER.md` stores what the agent learns about you — your name, preferences, projects, working style
+- **Long-Term Memory**: `MEMORY.md` accumulates facts, decisions, and learnings across all sessions
+- **Daily Journal**: Automatic `daily_memo_YYYY_MM_DD.md` files track daily work, conversations, and follow-ups
+- **Heartbeat**: Scheduled tasks via cron expressions in `HEARTBEAT.md` — the agent acts autonomously on a timer
+- **Session Continuity**: Automatic session resume across restarts via `LAST_SESSION.txt`
+
+## Core Principle
+
+**Everything runs through CLI — no API calls.** AI providers are controlled by spawning their CLI binaries as child processes:
+
+- `claude` (Claude Code)
+- `codex` (Codex CLI)
+- `gemini` (Gemini CLI)
+- `opencode` (OpenCode)
+
+This means Pawpaw runs within each agent's existing subscription (or free tier) with **zero additional API costs**.
 
 ## Quick Start
+
+### Prerequisites
+
+- One of: [Claude Code](https://claude.ai/code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenCode](https://github.com/opencode-ai/opencode) installed and available in PATH
+
+### Install & Run
 
 **macOS / Linux:**
 
@@ -20,86 +48,90 @@ curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
 irm https://cokacdir.cokac.com/manage.ps1 | iex; cokacctl
 ```
 
-Running the command will open the cokacdir management TUI. Then:
+### Initialize Agent Mode
 
-1. Press **`i`** to install cokacdir
-2. After installation completes, enter your Telegram bot token (create one via [@BotFather](https://t.me/botfather))
-3. Press **`s`** to start the server
+1. Launch the app and open the AI screen (press `.`)
+2. Type `/agent init`
+3. Edit the generated files in `~/.cokacdir/agent/` to customize your agent
 
-That’s it — open Telegram and start chatting with your bot.
+```
+~/.cokacdir/agent/
+├── SOUL.md          # Personality, values, communication style
+├── IDENTITY.md      # Name, role, capabilities
+├── USER.md          # What the agent knows about you
+├── MEMORY.md        # Long-term memory (auto-summarized at 50KB)
+├── AGENT.md         # Behavioral guidelines
+├── HEARTBEAT.md     # Scheduled tasks (cron format)
+├── workspace/       # Agent's free working directory
+└── daily/           # Daily memo files
+```
 
-## Key Features
+### Agent Commands
 
-* **Blazing-fast performance**: Written in Rust for maximum performance. A single binary (15–20MB depending on platform), optimized with LTO and strip.
-* **AI-powered commands**: Natural-language coding and file management powered by Claude, Codex, Gemini, and OpenCode. Press `.` and describe what you want done.
-* **Multi-panel navigation**: A dynamic multi-panel interface for efficient file management
-* **Keyboard-first**: Full keyboard navigation for power users
-* **Built-in editor**: File editing with syntax highlighting for more than 20 languages
-* **Image viewer**: View images directly in the terminal (Kitty, iTerm2, Sixel protocols), with zoom and pan support
-* **Process manager**: Monitor and manage system processes with sortable columns
-* **File search**: Recursive file search by name pattern
-* **Diff**: Side-by-side comparison of folders and files
-* **Git integration**: Built-in git status, commit, log, branch management, and diff between commits
-* **Remote SSH/SFTP**: Explore remote servers over SSH/SFTP with saved profiles
-* **File encryption**: AES-256 encryption with configurable chunk splitting
-* **Duplicate file detection**: Detect and manage duplicate files using hash-based comparison
-* **Telegram bot**: Remotely control AI coding sessions through Telegram with streaming output
-* **Customizable themes**: Light and dark themes with full JSON-based color customization
+| Command | Description |
+|---------|-------------|
+| `/agent init` | Initialize agent files and directories |
+| `/agent status` | Show agent status, paths, and session info |
+| `/agent reset-session` | Clear saved session and start fresh |
+| `/agent memory` | Show memory size and summarization status |
 
-## Community
+## Features
 
-Telegram group for tips, updates, and support:
-**[@cokacvibe](https://t.me/cokacvibe)**
+### From cokacdir (Terminal File Manager)
 
-## Documentation
+- **Multi-panel navigation** with keyboard-first design
+- **Built-in editor** with syntax highlighting (20+ languages)
+- **Image viewer** (Kitty, iTerm2, Sixel)
+- **Git integration** (status, commit, log, branch, diff)
+- **SSH/SFTP** remote file access
+- **AES-256 file encryption**
+- **Process manager**, **diff viewer**, **duplicate detection**
+- **Telegram bot** for remote AI sessions
+- **Customizable themes** (light/dark with JSON color config)
 
-For AI provider setup, keyboard shortcuts, and detailed documentation, visit:
-**[https://cokacdir.cokac.com](https://cokacdir.cokac.com)**
+### Pawpaw Agent System
 
-## Telegram Bot
+- **Persistent identity** — consistent personality across all sessions
+- **Long-term memory** — accumulates and auto-summarizes when too large
+- **Daily journaling** — automatic daily memos with work logs
+- **Heartbeat scheduler** — cron-based autonomous task execution
+- **Session resume** — picks up where you left off
+- **Full autonomy** — runs with `--dangerously-skip-permissions` for uninterrupted operation
+- **Workspace** — dedicated directory for agent drafts and working files
 
-**Features:**
+## HEARTBEAT.md Format
 
-* Multi-provider support (Claude, Codex, Gemini, OpenCode) with real-time streaming
-* Session persistence and cross-provider session interpretation
-* Scheduled tasks using cron expressions or absolute time
-* Group chat support where multiple bots share context
-* Bot-to-bot messaging for multi-agent workflows
-* File upload/download, tool management, debug logging
+Define scheduled tasks using cron expressions:
 
-**Commands:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
+```markdown
+## Active Tasks
+- [cron: 0 9 * * *] Create today's daily memo and review yesterday's work
+- [cron: 0 18 * * *] Summarize today's work in the daily memo
+- [cron: 0 0 * * 0] Weekly review — summarize the week and update MEMORY.md
+```
 
 ## Supported Platforms
 
-* macOS (Apple Silicon & Intel)
-* Linux (x86_64 & ARM64)
-* Windows (x86_64 & ARM64)
+- macOS (Apple Silicon & Intel)
+- Linux (x86_64 & ARM64)
+- Windows (x86_64 & ARM64)
+
+## Tech Stack
+
+- **Language**: Rust (~60K lines)
+- **TUI**: Ratatui + Crossterm
+- **Async**: Tokio
+- **TLS**: rustls (no OpenSSL dependency)
+- **Build**: Python-based cross-compilation (Zig toolchain)
 
 ## License
 
 MIT License
 
-## Author
+## Credits
 
-cokac
-[monogatree@gmail.com](mailto:monogatree@gmail.com)
-
-Homepage: [https://cokacdir.cokac.com](https://cokacdir.cokac.com)
+Based on [cokacdir](https://github.com/kstost/cokacdir) by [cokac](mailto:monogatree@gmail.com).
 
 ## Disclaimer
 
-THIS SOFTWARE IS PROVIDED “AS IS,” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
-
-IN NO EVENT SHALL THE AUTHOR, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF THE SOFTWARE.
-
-This includes, but is not limited to:
-
-* Data loss or corruption
-* System damage or malfunction
-* Security breaches or vulnerabilities
-* Financial loss
-* Direct, indirect, incidental, special, punitive, or consequential damages
-
-The user assumes full responsibility for all consequences arising from the use of this software, whether such use was intended, authorized, or foreseeable.
-
-**ALL RISKS ASSOCIATED WITH USE ARE BORNE BY THE USER.**
+THIS SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND. The user assumes full responsibility for all consequences arising from the use of this software. AI agents running in autonomous mode may execute system commands — use with caution.
