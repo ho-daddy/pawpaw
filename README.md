@@ -32,8 +32,7 @@ This means Pawpaw runs within each agent's existing subscription (or free tier) 
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) toolchain (`rustup default stable` 로 기본 툴체인 설정 필요)
-- [Python 3](https://www.python.org/) (for build script)
+- [Python 3](https://www.python.org/)
 - One of: [Claude Code](https://claude.ai/code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenCode](https://github.com/opencode-ai/opencode) installed and available in PATH
 
 ### Install & Run
@@ -43,7 +42,7 @@ This means Pawpaw runs within each agent's existing subscription (or free tier) 
 ```bash
 git clone https://github.com/ho-daddy/pawpaw.git
 cd pawpaw
-rustup default stable       # 최초 1회: 기본 Rust 툴체인 설정
+python3 build.py --setup    # 최초 1회: Rust 툴체인 및 빌드 도구 설치 (builder/tools/)
 python3 build.py            # Native release build (debug: --debug)
 ```
 
