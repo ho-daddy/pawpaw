@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-COKACDIR is a multi-panel terminal file manager written in Rust (~60K lines) with built-in file editor, image viewer, AI chat, Git integration, SSH/SFTP, encryption, Telegram/Discord bot, and process manager. Built on Ratatui + Crossterm.
+Pawpaw is a persistent AI agent with soul, memory, and autonomy — built on [cokacdir](https://github.com/kstost/cokacdir), a multi-panel terminal file manager written in Rust (~60K lines). The TUI app includes a file editor, image viewer, AI chat, Git integration, SSH/SFTP, encryption, Telegram/Discord bot, and process manager. Built on Ratatui + Crossterm.
+
+**Core principle**: All AI providers are invoked as spawned CLI subprocesses (not SDK libraries) — zero additional API costs.
 
 ## CRITICAL: Do Not Change Design Without Permission
 
@@ -72,12 +74,16 @@ Tests are in `tests/file_operations.rs` (integration tests for file ops using `t
 
 ## Architecture
 
-### Entry Point & Startup
+### CLI Mode Dispatch
 
-`src/main.rs` handles CLI argument parsing and launches the TUI event loop. Key startup flow:
-1. `init_bin_path()` / `deploy_docs()` / config init
-2. CLI mode dispatch: TUI (default), `--prompt` (AI), `--ccserver` (bot), `--bridge` (AI provider), etc.
-3. TUI mode: `enable_raw_mode()` -> `App::new()` -> render/event loop -> cleanup
+`src/main.rs` handles CLI argument parsing and dispatches to mutually exclusive modes:
+- **Default (TUI)**: Interactive multi-panel file manager with event loop
+- **`--prompt <TEXT>`**: Direct AI query — spawns Claude CLI subprocess, renders markdown to stdout
+- **`--bridge <BACKEND>`**: AI provider bridge — translates Claude-compatible args to other provider CLIs (e.g., gemini)
+- **`--ccserver <TOKEN>...`**: Bot server — runs persistent Telegram/Discord bots with HTTP API proxy
+- **`--cron` / `--cron-list` / `--cron-remove` / `--cron-update`**: Schedule management for bot automation
+
+TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_raw_mode()` → `App::new()` → render/event loop → cleanup
 
 ### Module Layout
 
@@ -86,7 +92,7 @@ Tests are in `tests/file_operations.rs` (integration tests for file ops using `t
 - **`src/keybindings.rs`** - Keyboard event mapping and action dispatch
 
 **`src/ui/`** - TUI rendering (Ratatui-based):
-- `app.rs` - Main application state machine and event loop (largest UI file)
+- `app.rs` - Main application state machine (~6600 lines). 14 screens via `Screen` enum, separate `Dialog` enum for modals. Event loop driven by 100ms Crossterm tick + keyboard events.
 - `draw.rs` - Low-level rendering primitives
 - `dialogs.rs` - All modal dialogs (create, delete, rename, etc.)
 - `ai_screen.rs` - AI chat interface
@@ -97,13 +103,14 @@ Tests are in `tests/file_operations.rs` (integration tests for file ops using `t
 - `syntax.rs` - Syntax highlighting engine
 
 **`src/services/`** - Backend business logic:
-- `file_ops.rs` - File operations with progress tracking
-- `claude.rs`, `codex.rs`, `gemini.rs`, `opencode.rs` - AI provider bridges
+- `file_ops.rs` - File operations with progress tracking via mpsc channels (`ProgressMessage`)
+- `claude.rs`, `codex.rs`, `gemini.rs`, `opencode.rs` - AI provider subprocess wrappers (spawned via `Command::new`, communicate over stdin/stdout pipes)
+- `agent.rs` - Persistent agent system: merges `~/.cokacdir/agent/{SOUL,IDENTITY,USER,MEMORY,AGENT,HEARTBEAT}.md` into system prompt. MEMORY truncated to 8K chars. Daily memos in `agent/daily/`
 - `telegram.rs` - Telegram bot server (largest file, ~10K lines)
-- `messenger_bridge.rs` / `bridge.rs` - AI message routing
-- `remote.rs` / `remote_transfer.rs` - SSH/SFTP connections
-- `process.rs` - Process monitoring
-- `dedup.rs` - Duplicate file detection
+- `messenger_bridge.rs` / `bridge.rs` - Multi-messenger abstraction: MessengerBackend trait → HTTP proxy → Telegram Bot API (enables Discord/Slack without modifying telegram.rs)
+- `remote.rs` / `remote_transfer.rs` - SSH/SFTP connections via `russh` (no OpenSSH dependency)
+- `process.rs` - Process monitoring via `/proc` (Unix)
+- `dedup.rs` - Duplicate file detection with MD5 hashing
 
 **`src/enc/`** - AES-256-CBC encryption (mod.rs, crypto.rs, naming.rs, error.rs)
 
@@ -111,8 +118,11 @@ Tests are in `tests/file_operations.rs` (integration tests for file ops using `t
 
 ### Key Patterns
 
-- **Async**: Tokio runtime for AI streaming, file transfers, bot operations
+- **AI provider discovery**: Uses `which <provider>` with fallback to `bash -lc "which <provider>"` for SSH sessions without loaded profiles
+- **AI system prompts**: Written to temp files in `~/.cokacdir/system_prompt/`, passed via `--append-system-prompt-file`
+- **Async**: Tokio runtime for AI streaming, file transfers, bot operations (TUI rendering is synchronous)
 - **Platform-specific code**: Uses `cfg!(target_os = ...)` conditionals (no Cargo feature flags)
 - **Clippy lints**: `unwrap_used` and `expect_used` are warnings - handle Results/Options properly
 - **TLS**: Uses `rustls` everywhere (no OpenSSL dependency)
-- **Config directory**: `~/.cokacdir/` (settings, themes, docs, database, schedules)
+- **Config directory**: `~/.cokacdir/` (settings, themes, docs, database, schedules, agent/, system_prompt/, bot_settings.json, .cokacdir.db)
+- **Binary self-resolution**: `std::env::current_exe()` cached in `OnceLock` at startup, used for respawning

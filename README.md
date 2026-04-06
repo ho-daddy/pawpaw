@@ -32,21 +32,20 @@ This means Pawpaw runs within each agent's existing subscription (or free tier) 
 
 ### Prerequisites
 
+- [Rust](https://rustup.rs/) toolchain
+- [Python 3](https://www.python.org/) (for cross-compilation build script)
 - One of: [Claude Code](https://claude.ai/code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenCode](https://github.com/opencode-ai/opencode) installed and available in PATH
 
 ### Install & Run
 
-**macOS / Linux:**
-
 ```bash
-curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
+git clone https://github.com/anthropics/pawpaw.git
+cd pawpaw
+python3 build.py          # Native release build (output: dist/)
+./dist/cokacdir            # Run the built binary
 ```
 
-**Windows (run PowerShell as Administrator):**
-
-```powershell
-irm https://cokacdir.cokac.com/manage.ps1 | iex; cokacctl
-```
+For debug builds (faster compile): `python3 build.py --debug`
 
 ### Initialize Agent Mode
 
