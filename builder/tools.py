@@ -87,8 +87,12 @@ class ToolInstaller:
     def _get_rust_env(self) -> dict:
         """Get environment variables for Rust operations."""
         env = os.environ.copy()
-        env["CARGO_HOME"] = str(self.cargo_home)
-        env["RUSTUP_HOME"] = str(self.rustup_home)
+
+        # Only override Rust environment if local installation exists
+        local_cargo = self.cargo_home / "bin" / "cargo"
+        if local_cargo.exists():
+            env["CARGO_HOME"] = str(self.cargo_home)
+            env["RUSTUP_HOME"] = str(self.rustup_home)
 
         # Add cargo bin to PATH
         cargo_bin = self.cargo_home / "bin"
@@ -642,9 +646,11 @@ class ToolInstaller:
         """Get environment variables for build process."""
         env = os.environ.copy()
 
-        # Set Rust environment
-        env["CARGO_HOME"] = str(self.cargo_home)
-        env["RUSTUP_HOME"] = str(self.rustup_home)
+        # Only override Rust environment if local installation exists
+        local_cargo = self.cargo_home / "bin" / "cargo"
+        if local_cargo.exists():
+            env["CARGO_HOME"] = str(self.cargo_home)
+            env["RUSTUP_HOME"] = str(self.rustup_home)
 
         # Build PATH with all tools
         path_parts = []
