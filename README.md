@@ -33,25 +33,37 @@ This means Pawpaw runs within each agent's existing subscription (or free tier) 
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) toolchain
-- [Python 3](https://www.python.org/) (for cross-compilation build script)
+- [Python 3](https://www.python.org/) (for build script)
 - One of: [Claude Code](https://claude.ai/code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenCode](https://github.com/opencode-ai/opencode) installed and available in PATH
 
 ### Install & Run
 
+**1. Clone and build:**
+
 ```bash
-git clone https://github.com/anthropics/pawpaw.git
+git clone https://github.com/ho-daddy/pawpaw.git
 cd pawpaw
-python3 build.py          # Native release build (output: dist/)
-./dist/cokacdir            # Run the built binary
+python3 build.py            # Native release build (debug: --debug)
 ```
 
-For debug builds (faster compile): `python3 build.py --debug`
+빌드가 완료되면 `dist_beta/` 디렉토리에 바이너리가 생성됩니다.
 
-### Initialize Agent Mode
+**2. Run the built binary:**
 
-1. Launch the app and open the AI screen (press `.`)
-2. Type `/agent init`
-3. Edit the generated files in `~/.cokacdir/agent/` to customize your agent
+```bash
+# Linux
+./dist_beta/cokacdir-linux-x86_64       # x86_64
+./dist_beta/cokacdir-linux-aarch64      # ARM64
+
+# macOS
+./dist_beta/cokacdir-macos-aarch64      # Apple Silicon
+./dist_beta/cokacdir-macos-x86_64       # Intel
+```
+
+**3. Initialize the agent:**
+
+앱이 실행되면 `.` 키를 눌러 AI 화면으로 진입한 뒤, `/agent init` 명령어를 입력하세요.
+`~/.cokacdir/agent/` 에 에이전트 설정 파일들이 생성되며, 이를 편집하여 에이전트를 커스터마이즈할 수 있습니다.
 
 ```
 ~/.cokacdir/agent/
