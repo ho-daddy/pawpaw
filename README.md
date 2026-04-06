@@ -48,7 +48,21 @@ python3 build.py            # Native release build (debug: --debug)
 
 빌드가 완료되면 `dist_beta/` 디렉토리에 바이너리가 생성됩니다.
 
-**2. Run the built binary:**
+**2. Setup (에이전트 시스템, 텔레그램 봇, systemd 서비스 설정):**
+
+```bash
+bash setup.sh
+```
+
+설치 스크립트가 다음을 자동으로 처리합니다:
+- `~/.cokacdir/agent/` 디렉토리 구조 및 에이전트 파일 생성 (SOUL, IDENTITY, USER, MEMORY, AGENT, HEARTBEAT)
+- docs, themes 리소스 복사
+- 텔레그램 봇 설정 (대화형으로 토큰, User ID 입력)
+- systemd 사용자 서비스 등록 및 시작
+
+이미 존재하는 파일은 덮어쓰지 않으므로 안전하게 재실행할 수 있습니다.
+
+**3. Run (직접 실행 시):**
 
 ```bash
 # Linux
@@ -60,10 +74,9 @@ python3 build.py            # Native release build (debug: --debug)
 ./dist_beta/cokacdir-macos-x86_64       # Intel
 ```
 
-**3. Initialize the agent:**
+**4. Initialize the agent (수동 설정 시):**
 
-앱이 실행되면 `.` 키를 눌러 AI 화면으로 진입한 뒤, `/agent init` 명령어를 입력하세요.
-`~/.cokacdir/agent/` 에 에이전트 설정 파일들이 생성되며, 이를 편집하여 에이전트를 커스터마이즈할 수 있습니다.
+setup.sh 없이 수동으로 설정할 경우, 앱을 실행하고 `.` 키를 눌러 AI 화면으로 진입한 뒤 `/agent init` 명령어를 입력하세요.
 
 ```
 ~/.cokacdir/agent/
