@@ -384,6 +384,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Keep formatting minimal and terminal-friendly"#;
 
     // Write system prompt to file to avoid OS "Argument list too long" (E2BIG)
+    // When agent mode is active, use agent system prompt instead of default.
+    let agent_prompt_owned: Option<String> = super::agent::build_agent_system_prompt();
+    let effective_sp: &str = match &agent_prompt_owned {
+        Some(ap) => ap.as_str(),
+        None => default_system_prompt,
+    };
     struct SpFileGuard(Option<std::path::PathBuf>);
     impl Drop for SpFileGuard {
         fn drop(&mut self) {
@@ -393,7 +399,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     let sp_dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir).join(".cokacdir");
     let _ = std::fs::create_dir_all(&sp_dir);
     let sp_path = sp_dir.join(format!("system_prompt_{}", simple_uuid()));
-    if let Err(e) = std::fs::write(&sp_path, default_system_prompt) {
+    if let Err(e) = std::fs::write(&sp_path, effective_sp) {
         return ClaudeResponse {
             success: false,
             response: None,
@@ -798,7 +804,8 @@ pub fn is_ai_supported() -> bool {
 }
 
 /// Execute a command using Claude CLI with streaming output
-/// If `system_prompt` is None, uses the default file manager system prompt.
+/// If `system_prompt` is None, uses the default file manager system prompt
+/// (or agent system prompt when agent mode is active).
 /// If `system_prompt` is Some(""), no system prompt is appended.
 pub fn execute_command_streaming(
     prompt: &str,
@@ -866,8 +873,21 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Always write system prompt to file and use --append-system-prompt-file
     // to avoid OS "Argument list too long" (E2BIG) error.
-    let effective_prompt = match system_prompt {
-        None => Some(default_system_prompt),
+    //
+    // When agent mode is active and no explicit system_prompt is provided,
+    // use the agent system prompt instead of the default file-manager prompt.
+    let agent_prompt_owned: Option<String> = if system_prompt.is_none() {
+        super::agent::build_agent_system_prompt()
+    } else {
+        None
+    };
+    let effective_prompt: Option<&str> = match system_prompt {
+        None => {
+            match &agent_prompt_owned {
+                Some(ap) => Some(ap.as_str()),
+                None => Some(default_system_prompt),
+            }
+        }
         Some("") => None,
         Some(p) => Some(p),
     };

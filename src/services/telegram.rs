@@ -930,7 +930,7 @@ fn parse_relative_time(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 
 /// Check if a cron expression matches the given datetime.
 /// 5 fields: minute, hour, day-of-month, month, day-of-week (0=Sun)
-fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
+pub fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
     use chrono::Datelike;
     use chrono::Timelike;
 
@@ -967,7 +967,7 @@ fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
 /// Check if a single cron field matches a value.
 /// Supports: *, single number, comma-separated list, ranges (a-b), step (*/n, a-b/n)
 /// range_start: the minimum value for this field (0 for minute/hour/dow, 1 for day/month)
-fn cron_field_matches(field: &str, val: u32, range_start: u32) -> bool {
+pub fn cron_field_matches(field: &str, val: u32, range_start: u32) -> bool {
     if field == "*" { return true; }
 
     for part in field.split(',') {

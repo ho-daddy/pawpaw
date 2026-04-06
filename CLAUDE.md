@@ -1,4 +1,10 @@
-You can get Rust build methods from build_manual.md file
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+COKACDIR is a multi-panel terminal file manager written in Rust (~60K lines) with built-in file editor, image viewer, AI chat, Git integration, SSH/SFTP, encryption, Telegram/Discord bot, and process manager. Built on Ratatui + Crossterm.
 
 ## CRITICAL: Do Not Change Design Without Permission
 
@@ -17,6 +23,31 @@ You can get Rust build methods from build_manual.md file
 - Do not use `cargo build`, `python3 build.py`, or any build commands unless user asks
 - Focus only on code modifications; user handles all builds manually
 
+### Build Commands (when requested)
+
+Build uses a Python-based cross-compilation framework. See `build_manual.md` for full details.
+
+```bash
+python3 build.py                # Native release build
+python3 build.py --debug        # Debug build (faster compile)
+python3 build.py --all          # All platforms (except Windows)
+python3 build.py --windows      # Windows builds
+python3 build.py --setup        # Install all build tools
+python3 build.py --status       # Check tool status
+```
+
+Output binaries go to `dist/`.
+
+### Running Tests
+
+```bash
+cargo test                          # All tests
+cargo test <test_name>              # Single test (e.g., test_copy_single_file)
+cargo test -- --nocapture           # With stdout output
+```
+
+Tests are in `tests/file_operations.rs` (integration tests for file ops using `tempfile` crate).
+
 ## Version Management
 
 - Version is defined in `Cargo.toml` (line 3: `version = "x.x.x"`)
@@ -34,7 +65,54 @@ You can get Rust build methods from build_manual.md file
 
 ### Theme File Locations
 
-- **Source of truth**: `src/ui/theme.rs` - 테마 색상 값과 JSON 주석 모두 이 파일에서 정의
-- **Generated files**: `~/.cokacdir/themes/*.json` - 프로그램 실행 시 생성되는 사용자 설정 파일
-- 테마 수정 시 반드시 `src/ui/theme.rs`를 수정해야 함 (생성된 JSON 파일 직접 수정 금지)
-- JSON 주석 형식: `"__field__": "설명"` - 이 주석들도 theme.rs의 `to_json()` 함수 내에 정의됨
+- **Source of truth**: `src/ui/theme.rs` - theme color values and JSON comments are defined here
+- **Generated files**: `~/.cokacdir/themes/*.json` - user config files generated at runtime
+- Always modify `src/ui/theme.rs` for theme changes (never edit generated JSON directly)
+- JSON comment format: `"__field__": "description"` - these comments are also defined in `to_json()` in theme.rs
+
+## Architecture
+
+### Entry Point & Startup
+
+`src/main.rs` handles CLI argument parsing and launches the TUI event loop. Key startup flow:
+1. `init_bin_path()` / `deploy_docs()` / config init
+2. CLI mode dispatch: TUI (default), `--prompt` (AI), `--ccserver` (bot), `--bridge` (AI provider), etc.
+3. TUI mode: `enable_raw_mode()` -> `App::new()` -> render/event loop -> cleanup
+
+### Module Layout
+
+- **`src/main.rs`** - Entry point, CLI arg parsing, top-level handler functions
+- **`src/config.rs`** - Settings management (`~/.cokacdir/settings.json`)
+- **`src/keybindings.rs`** - Keyboard event mapping and action dispatch
+
+**`src/ui/`** - TUI rendering (Ratatui-based):
+- `app.rs` - Main application state machine and event loop (largest UI file)
+- `draw.rs` - Low-level rendering primitives
+- `dialogs.rs` - All modal dialogs (create, delete, rename, etc.)
+- `ai_screen.rs` - AI chat interface
+- `file_viewer.rs` / `file_editor.rs` - Text viewing and editing with syntax highlighting
+- `diff_screen.rs` / `diff_file_view.rs` - Side-by-side diff
+- `git_screen.rs` - Git operations UI
+- `theme.rs` / `theme_loader.rs` - Color system (100+ fields, JSON theme loading)
+- `syntax.rs` - Syntax highlighting engine
+
+**`src/services/`** - Backend business logic:
+- `file_ops.rs` - File operations with progress tracking
+- `claude.rs`, `codex.rs`, `gemini.rs`, `opencode.rs` - AI provider bridges
+- `telegram.rs` - Telegram bot server (largest file, ~10K lines)
+- `messenger_bridge.rs` / `bridge.rs` - AI message routing
+- `remote.rs` / `remote_transfer.rs` - SSH/SFTP connections
+- `process.rs` - Process monitoring
+- `dedup.rs` - Duplicate file detection
+
+**`src/enc/`** - AES-256-CBC encryption (mod.rs, crypto.rs, naming.rs, error.rs)
+
+**`src/utils/`** - Helpers (markdown rendering, path formatting)
+
+### Key Patterns
+
+- **Async**: Tokio runtime for AI streaming, file transfers, bot operations
+- **Platform-specific code**: Uses `cfg!(target_os = ...)` conditionals (no Cargo feature flags)
+- **Clippy lints**: `unwrap_used` and `expect_used` are warnings - handle Results/Options properly
+- **TLS**: Uses `rustls` everywhere (no OpenSSL dependency)
+- **Config directory**: `~/.cokacdir/` (settings, themes, docs, database, schedules)

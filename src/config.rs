@@ -106,6 +106,9 @@ pub struct Settings {
     /// Telegram API polling interval in milliseconds (minimum 2500, default 3000)
     #[serde(default = "default_telegram_polling_time")]
     pub telegram_polling_time: u64,
+    /// Agent mode: persistent identity, memory, and daily journaling
+    #[serde(default)]
+    pub agent_enabled: bool,
 }
 
 impl Default for Settings {
@@ -175,6 +178,7 @@ impl Default for Settings {
             keybindings: KeybindingsConfig::default(),
             encrypt_split_size: default_encrypt_split_size(),
             telegram_polling_time: default_telegram_polling_time(),
+            agent_enabled: false,
         }
     }
 }
