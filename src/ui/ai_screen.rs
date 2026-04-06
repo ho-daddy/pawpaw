@@ -698,10 +698,10 @@ impl AIScreenState {
                 session_id.as_deref(),
                 &current_path,
                 tx.clone(),
-                None,   // system_prompt: None → uses agent prompt automatically
-                None,   // allowed_tools
-                None,   // cancel_token
-                None,   // model
+                None,           // system_prompt: None → uses agent prompt automatically
+                None,           // allowed_tools
+                None,           // cancel_token
+                Some("sonnet"), // model: sonnet for heartbeat tasks
                 false,  // no_session_persistence
                 false,  // use_chrome
             );
@@ -1151,6 +1151,9 @@ Keep responses concise and terminal-friendly.",
             debug_log(&format!("submit:thread: Calling execute_command_streaming with path={}", current_path));
             let start_time = std::time::Instant::now();
 
+            // Agent mode defaults to sonnet for cost efficiency
+            let model: Option<&str> = if agent_mode { Some("sonnet") } else { None };
+
             let result = claude::execute_command_streaming(
                 &context_prompt,
                 session_id.as_deref(),
@@ -1159,7 +1162,7 @@ Keep responses concise and terminal-friendly.",
                 None,
                 None,
                 None,
-                None,
+                model,
                 false,
                 false,
             );
