@@ -1456,7 +1456,7 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
          \"{bin}\" --cron-update <SCHEDULE_ID> --at \"<NEW_TIME>\" --chat {chat_id} --key {bot_key}\n\
          • --at accepts the same formats as --cron\n\
          • Output: {{\"status\":\"ok\",\"id\":\"...\",\"schedule\":\"...\"}}\n\n\
-         ═══════════════════════════════════════{group_chat_cowork_section}{group_chat_log_section}{bot_messaging_section}{disabled_notice}",
+         ═══════════════════════════════════════{group_chat_cowork_section}{group_chat_log_section}{bot_messaging_section}{disabled_notice}{agent_section}",
         role = role,
         bot_username_line = bot_username_line,
         chat_id_line = chat_id_line,
@@ -1469,6 +1469,10 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
         group_chat_cowork_section = group_chat_cowork_section,
         group_chat_log_section = group_chat_log_section,
         bot_messaging_section = bot_messaging_section,
+        agent_section = match super::agent::build_agent_system_prompt() {
+            Some(ap) => format!("\n\n{}", ap),
+            None => String::new(),
+        },
     )
 }
 
