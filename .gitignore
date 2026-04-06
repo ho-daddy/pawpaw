@@ -4,6 +4,9 @@
 Cargo.lock
 
 
+# Build output binaries
+/dist/
+
 # Builder tools (downloaded automatically)
 /builder/tools/
 
