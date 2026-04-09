@@ -81,6 +81,8 @@ fn print_help() {
     println!("                            Remove a schedule");
     println!("    --cron-update <SID> --at <TIME> --chat <ID> --key <HASH>");
     println!("                            Update schedule time");
+    println!("    --voice <TEXT> [--session <SID>]");
+    println!("                            Voice chat mode: send prompt, get JSON response with session");
     println!("    --message <TEXT> --to <BOT> --chat <ID> --key <HASH>");
     println!("                            Send message to another bot (internal use)");
     println!("    --read_chat_log <CHAT_ID> [--range <N|START-END>] [--bot <USERNAME>]");
@@ -748,6 +750,36 @@ fn handle_ccserver(tokens: Vec<String>) {
     }
 }
 
+fn handle_voice(prompt: &str, session_id: Option<&str>) {
+    if !claude::is_claude_available() {
+        println!("{}", serde_json::json!({"status":"error","message":"Claude CLI not available"}));
+        return;
+    }
+
+    let working_dir = dirs::home_dir()
+        .map(|p| p.join(".cokacdir").join("workspace"))
+        .and_then(|p| if p.exists() { Some(p.display().to_string()) } else { None })
+        .unwrap_or_else(|| std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string()));
+
+    let response = claude::execute_command(prompt, session_id, &working_dir, None, None);
+
+    if !response.success {
+        println!("{}", serde_json::json!({
+            "status": "error",
+            "message": response.error.unwrap_or_else(|| "Unknown error".to_string())
+        }));
+        return;
+    }
+
+    println!("{}", serde_json::json!({
+        "status": "ok",
+        "response": response.response.unwrap_or_default(),
+        "session_id": response.session_id
+    }));
+}
+
 fn handle_prompt(prompt: &str) {
     use crate::ui::theme::Theme;
 
@@ -894,6 +926,33 @@ fn main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 }
+            }
+            "--voice" => {
+                // Parse: --voice <TEXT> [--session <SID>]
+                if i + 1 >= args.len() {
+                    println!("{}", serde_json::json!({"status":"error","message":"--voice requires a text argument"}));
+                    return Ok(());
+                }
+                let mut voice_text: Option<String> = None;
+                let mut voice_session: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--session" => {
+                            if j + 1 < args.len() { voice_session = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        _ if voice_text.is_none() && !args[j].starts_with("--") => {
+                            voice_text = Some(args[j].clone()); j += 1;
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                match voice_text {
+                    Some(text) => handle_voice(&text, voice_session.as_deref()),
+                    None => println!("{}", serde_json::json!({"status":"error","message":"--voice requires a text argument"})),
+                }
+                return Ok(());
             }
             "--prompt" => {
                 if i + 1 >= args.len() {
