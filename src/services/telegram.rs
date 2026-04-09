@@ -2798,13 +2798,40 @@ async fn handle_message(
     msg_debug(&format!("[prefix_filter] text={:?}, require_prefix={}, has_valid_prefix={}, direct_mode={}", truncate_str(&text, 100), require_prefix, has_valid_prefix, !require_prefix));
     if require_prefix && !has_valid_prefix {
         msg_debug(&format!("[prefix_filter] IGNORED: require_prefix=true (direct mode OFF), no valid prefix in text={:?}", truncate_str(&text, 80)));
-        // Clear pending uploads — this message was not for this bot,
-        // so any previously shared location/file data should be discarded.
-        let mut data = state.lock().await;
-        if let Some(session) = data.sessions.get_mut(&chat_id) {
-            if !session.pending_uploads.is_empty() {
-                msg_debug(&format!("[handle_message] clearing {} pending_uploads (not addressed to this bot)", session.pending_uploads.len()));
-                session.pending_uploads.clear();
+        // Record non-prefixed messages to the group chat shared log so bots
+        // can see the conversation context, even though they won't respond.
+        if chat_id.0 < 0 {
+            let mut data = state.lock().await;
+            let uname = data.bot_username.clone();
+            let dname = data.bot_display_name.clone();
+            if !uname.is_empty() {
+                let dn = if dname.is_empty() { None } else { Some(dname) };
+                append_group_chat_log(chat_id.0, &GroupChatLogEntry {
+                    ts: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                    bot: uname,
+                    bot_display_name: dn,
+                    role: "user".to_string(),
+                    from: Some(raw_user_name.to_string()),
+                    text: text.clone(),
+                    clear: false,
+                });
+                msg_debug(&format!("[prefix_filter] logged non-prefixed message to group chat log: {:?}", truncate_str(&text, 80)));
+            }
+            // Clear pending uploads — this message was not for this bot,
+            // so any previously shared location/file data should be discarded.
+            if let Some(session) = data.sessions.get_mut(&chat_id) {
+                if !session.pending_uploads.is_empty() {
+                    msg_debug(&format!("[handle_message] clearing {} pending_uploads (not addressed to this bot)", session.pending_uploads.len()));
+                    session.pending_uploads.clear();
+                }
+            }
+        } else {
+            // Private chat — should not happen (require_prefix is only true for groups)
+            let mut data = state.lock().await;
+            if let Some(session) = data.sessions.get_mut(&chat_id) {
+                if !session.pending_uploads.is_empty() {
+                    session.pending_uploads.clear();
+                }
             }
         }
         return Ok(());
