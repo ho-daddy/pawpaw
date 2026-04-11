@@ -1,10 +1,13 @@
 //! Context Trigger — 5-layer memory context loading based on user message keywords.
 //!
-//! Phase 1: Keyword matching from frontmatter `triggers` fields.
-//! Phase 2 (future): Semantic search via gemma4 + bge-m3.
+//! Phase 1: Keyword matching from frontmatter `triggers` fields (cached index, partial file read).
+//! Phase 2: Semantic search via local-agent — runs in background thread, results cached for next turn.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// Maximum characters to include from a single triggered file.
 const TRIGGER_FILE_MAX_CHARS: usize = 3_000;
@@ -12,13 +15,69 @@ const TRIGGER_FILE_MAX_CHARS: usize = 3_000;
 /// Maximum number of files to include per request.
 const TRIGGER_MAX_FILES: usize = 3;
 
+/// Cache TTL for the trigger index (seconds).
+const INDEX_CACHE_TTL_SECS: u64 = 60;
+
 /// A single trigger entry: keywords mapped to a file path.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TriggerEntry {
     keywords: Vec<String>,
     file_path: PathBuf,
     layer: &'static str,
     priority: u8, // lower = higher priority
+}
+
+/// Cached trigger index with timestamp.
+struct IndexCache {
+    entries: Vec<TriggerEntry>,
+    built_at: Instant,
+    agent_root: PathBuf,
+}
+
+static INDEX_CACHE: Mutex<Option<IndexCache>> = Mutex::new(None);
+
+/// Cached semantic search result from a background query.
+struct SemanticCache {
+    /// The user message that triggered this search.
+    query: String,
+    /// Results: (relative_file_path, category).
+    results: Vec<(String, String)>,
+    cached_at: Instant,
+}
+
+/// TTL for semantic cache (seconds). Results stay valid for one conversation turn cycle.
+const SEMANTIC_CACHE_TTL_SECS: u64 = 300;
+
+static SEMANTIC_CACHE: Mutex<Option<SemanticCache>> = Mutex::new(None);
+
+/// Check if two messages are similar enough to reuse cached semantic results.
+/// Uses simple word-overlap heuristic: if ≥50% of words in the query overlap, reuse.
+fn messages_similar(cached_query: &str, new_query: &str) -> bool {
+    let cached_words: std::collections::HashSet<&str> = cached_query.split_whitespace().collect();
+    let new_words: Vec<&str> = new_query.split_whitespace().collect();
+    if new_words.is_empty() || cached_words.is_empty() {
+        return false;
+    }
+    let overlap = new_words.iter().filter(|w| cached_words.contains(*w)).count();
+    // At least 50% of the new query's words must appear in the cached query
+    overlap * 2 >= new_words.len()
+}
+
+/// Get the trigger index, using cache if still fresh.
+fn get_trigger_index(agent_root: &Path) -> Vec<TriggerEntry> {
+    let mut cache = INDEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref c) = *cache {
+        if c.agent_root == agent_root && c.built_at.elapsed().as_secs() < INDEX_CACHE_TTL_SECS {
+            return c.entries.clone();
+        }
+    }
+    let entries = build_trigger_index(agent_root);
+    *cache = Some(IndexCache {
+        entries: entries.clone(),
+        built_at: Instant::now(),
+        agent_root: agent_root.to_path_buf(),
+    });
+    entries
 }
 
 /// Build the keyword trigger index by scanning projects/*/wiki.md and knowledge/wiki/*.md
@@ -77,30 +136,33 @@ fn build_trigger_index(agent_root: &Path) -> Vec<TriggerEntry> {
 }
 
 /// Parse `triggers: [kw1, kw2, ...]` from YAML frontmatter.
+/// Only reads the frontmatter portion of the file using BufReader, not the entire file.
 /// Returns lowercased keywords.
 fn parse_frontmatter_triggers(path: &Path) -> Vec<String> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
         Err(_) => return Vec::new(),
     };
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
 
-    // Check for frontmatter delimiters
-    if !content.starts_with("---") {
-        return Vec::new();
+    // First line must be "---"
+    match lines.next() {
+        Some(Ok(line)) if line.trim() == "---" => {}
+        _ => return Vec::new(),
     }
 
-    // Find the closing ---
-    let rest = &content[3..];
-    let end = match rest.find("\n---") {
-        Some(pos) => pos,
-        None => return Vec::new(),
-    };
-
-    let frontmatter = &rest[..end];
-
-    // Find triggers line
-    for line in frontmatter.lines() {
+    // Read frontmatter lines until closing "---"
+    for line in lines {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return Vec::new(),
+        };
         let trimmed = line.trim();
+        if trimmed == "---" {
+            // End of frontmatter, no triggers found
+            return Vec::new();
+        }
         if let Some(value) = trimmed.strip_prefix("triggers:") {
             let value = value.trim();
             // Parse [kw1, kw2, kw3] format
@@ -117,10 +179,12 @@ fn parse_frontmatter_triggers(path: &Path) -> Vec<String> {
 }
 
 /// Detect which files should be loaded based on keyword matching against the user message.
-/// Falls back to semantic search (Phase 2) if no keyword matches found.
+/// If keywords match: returns immediately with matched content.
+/// If no keyword match: checks cached semantic results from a previous background search,
+/// then spawns a new background semantic search for the next turn.
 /// Returns a formatted string to be injected into the system prompt, or empty string if no matches.
 pub fn detect_and_format_context(agent_root: &Path, user_message: &str) -> String {
-    let index = build_trigger_index(agent_root);
+    let index = get_trigger_index(agent_root);
 
     let lower_message = user_message.to_lowercase();
 
@@ -148,8 +212,24 @@ pub fn detect_and_format_context(agent_root: &Path, user_message: &str) -> Strin
             }
         }
     } else {
-        // Phase 2: semantic search fallback via local-agent
-        if let Some(results) = trigger_search_fallback(agent_root, user_message) {
+        // Phase 2: check semantic cache from previous background search
+        let cached_hit = {
+            let cache = SEMANTIC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref c) = *cache {
+                if c.cached_at.elapsed().as_secs() < SEMANTIC_CACHE_TTL_SECS
+                    && messages_similar(&c.query, &lower_message)
+                {
+                    Some(c.results.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(results) = cached_hit {
+            // Use cached semantic results from previous turn's background search
             for (file_rel, category) in results.iter().take(TRIGGER_MAX_FILES) {
                 let file_path = agent_root.join(file_rel);
                 let layer = match category.as_str() {
@@ -163,6 +243,22 @@ pub fn detect_and_format_context(agent_root: &Path, user_message: &str) -> Strin
                 }
             }
         }
+
+        // Always fire background semantic search for the next turn
+        // (regardless of cache hit — refreshes results for the current query)
+        let bg_root = agent_root.to_path_buf();
+        let bg_message = user_message.to_string();
+        let bg_lower = lower_message.clone();
+        std::thread::spawn(move || {
+            if let Some(results) = trigger_search_fallback(&bg_root, &bg_message) {
+                let mut cache = SEMANTIC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                *cache = Some(SemanticCache {
+                    query: bg_lower,
+                    results,
+                    cached_at: Instant::now(),
+                });
+            }
+        });
     }
 
     if sections.is_empty() {

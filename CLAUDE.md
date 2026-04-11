@@ -38,7 +38,7 @@ python3 build.py --setup        # Install all build tools
 python3 build.py --status       # Check tool status
 ```
 
-Output binaries go to `dist/`.
+Output binaries go to `dist/` (release) or `dist_beta/` (development).
 
 ### Running Tests
 
@@ -82,6 +82,10 @@ Tests are in `tests/file_operations.rs` (integration tests for file ops using `t
 - **`--bridge <BACKEND>`**: AI provider bridge — translates Claude-compatible args to other provider CLIs (e.g., gemini)
 - **`--ccserver <TOKEN>...`**: Bot server — runs persistent Telegram/Discord bots with HTTP API proxy
 - **`--cron` / `--cron-list` / `--cron-remove` / `--cron-update`**: Schedule management for bot automation
+- **`--voice <TEXT>`**: Voice chat interface for voice interaction
+- **`--message`**: Inter-bot messaging
+- **`--read_chat_log`**: Read group chat shared context logs
+- **`--design`**: Theme hot-reload mode for development
 
 TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_raw_mode()` → `App::new()` → render/event loop → cleanup
 
@@ -92,13 +96,20 @@ TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_r
 - **`src/keybindings.rs`** - Keyboard event mapping and action dispatch
 
 **`src/ui/`** - TUI rendering (Ratatui-based):
-- `app.rs` - Main application state machine (~6600 lines). 14 screens via `Screen` enum, separate `Dialog` enum for modals. Event loop driven by 100ms Crossterm tick + keyboard events.
+- `app.rs` - Main application state machine (~6650 lines). 14 screens via `Screen` enum, separate `DialogType` enum for modals. Event loop driven by 100ms Crossterm tick + keyboard events.
 - `draw.rs` - Low-level rendering primitives
 - `dialogs.rs` - All modal dialogs (create, delete, rename, etc.)
 - `ai_screen.rs` - AI chat interface
 - `file_viewer.rs` / `file_editor.rs` - Text viewing and editing with syntax highlighting
+- `image_viewer.rs` - Image rendering (Kitty, iTerm2, Sixel protocols)
 - `diff_screen.rs` / `diff_file_view.rs` - Side-by-side diff
 - `git_screen.rs` - Git operations UI
+- `advanced_search.rs` / `search_result.rs` - Advanced file search UI
+- `dedup_screen.rs` - Duplicate file detection UI
+- `file_info.rs` / `system_info.rs` - File and system info panels
+- `process_manager.rs` - Process manager UI
+- `panel.rs` - Panel layout primitives
+- `help.rs` - Help screen
 - `theme.rs` / `theme_loader.rs` - Color system (100+ fields, JSON theme loading)
 - `syntax.rs` - Syntax highlighting engine
 
@@ -106,7 +117,8 @@ TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_r
 - `file_ops.rs` - File operations with progress tracking via mpsc channels (`ProgressMessage`)
 - `claude.rs`, `codex.rs`, `gemini.rs`, `opencode.rs` - AI provider subprocess wrappers (spawned via `Command::new`, communicate over stdin/stdout pipes)
 - `agent.rs` - Persistent agent system: merges `~/.cokacdir/agent/{SOUL,IDENTITY,USER,MEMORY,AGENT,HEARTBEAT}.md` into system prompt. MEMORY truncated to 8K chars. Daily memos in `agent/daily/`
-- `telegram.rs` - Telegram bot server (largest file, ~10K lines)
+- `context_trigger.rs` - 5-layer semantic context system: matches keywords from frontmatter `triggers` fields to auto-load relevant context from `projects/*/wiki.md` and `knowledge/wiki/*.md`
+- `telegram.rs` - Telegram bot server (largest file, ~10.2K lines)
 - `messenger_bridge.rs` / `bridge.rs` - Multi-messenger abstraction: MessengerBackend trait → HTTP proxy → Telegram Bot API (enables Discord/Slack without modifying telegram.rs)
 - `remote.rs` / `remote_transfer.rs` - SSH/SFTP connections via `russh` (no OpenSSH dependency)
 - `process.rs` - Process monitoring via `/proc` (Unix)
@@ -115,6 +127,12 @@ TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_r
 **`src/enc/`** - AES-256-CBC encryption (mod.rs, crypto.rs, naming.rs, error.rs)
 
 **`src/utils/`** - Helpers (markdown rendering, path formatting)
+
+### Language & Localization
+
+- Code (variable names, comments in source) is in English
+- User-facing documentation (README, build manual, commit messages) is primarily in Korean
+- Commit messages are typically written in Korean — follow this convention
 
 ### Key Patterns
 
@@ -126,3 +144,5 @@ TUI startup: `init_bin_path()` → `deploy_docs()` → config init → `enable_r
 - **TLS**: Uses `rustls` everywhere (no OpenSSL dependency)
 - **Config directory**: `~/.cokacdir/` (settings, themes, docs, database, schedules, agent/, system_prompt/, bot_settings.json, .cokacdir.db)
 - **Binary self-resolution**: `std::env::current_exe()` cached in `OnceLock` at startup, used for respawning
+- **Agent file hierarchy**: `~/.cokacdir/agent/` contains `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md`, `AGENT.md`, `HEARTBEAT.md` — all merged into AI system prompts by `agent.rs`. MEMORY auto-summarizes when exceeding 50KB. Daily memos stored in `agent/daily/`
+- **Cross-compilation**: Build system uses Zig as the C cross-compiler toolchain, installed locally in `builder/tools/` to avoid polluting the system environment
