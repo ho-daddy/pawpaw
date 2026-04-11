@@ -306,8 +306,8 @@ fn trigger_search_fallback(agent_root: &Path, user_message: &str) -> Option<Vec<
         .spawn()
         .ok()?;
 
-    // Wait with timeout to prevent indefinite blocking
-    let timeout = std::time::Duration::from_secs(5);
+    // Wait with timeout — runs in background thread so generous timeout is fine
+    let timeout = std::time::Duration::from_secs(15);
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
