@@ -192,6 +192,7 @@ fn format_file_section(file_path: &Path, layer: &str) -> Option<String> {
 
 /// Phase 2 fallback: call local-agent trigger-search.
 /// Returns Vec<(relative_file_path, category)> or None on failure.
+/// Uses a 5-second timeout to prevent blocking the async message handler.
 fn trigger_search_fallback(agent_root: &Path, user_message: &str) -> Option<Vec<(String, String)>> {
     let local_agent_dir = dirs::home_dir()?.join(".cokacdir").join("local-agent");
     if !local_agent_dir.join("agent.py").exists() {
@@ -201,12 +202,38 @@ fn trigger_search_fallback(agent_root: &Path, user_message: &str) -> Option<Vec<
     // Truncate message to avoid command-line length issues
     let msg: String = user_message.chars().take(200).collect();
 
-    let output = std::process::Command::new("python3")
+    let mut child = std::process::Command::new("python3")
         .args(&["agent.py", "trigger-search", &msg])
         .current_dir(&local_agent_dir)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
 
+    // Wait with timeout to prevent indefinite blocking
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
