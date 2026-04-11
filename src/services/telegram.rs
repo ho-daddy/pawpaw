@@ -1469,9 +1469,15 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
         group_chat_cowork_section = group_chat_cowork_section,
         group_chat_log_section = group_chat_log_section,
         bot_messaging_section = bot_messaging_section,
-        agent_section = match super::agent::build_agent_system_prompt() {
-            Some(ap) => format!("\n\n{}", ap),
-            None => String::new(),
+        agent_section = match user_message {
+            Some(msg) => match super::agent::build_agent_system_prompt_with_context(msg) {
+                Some(ap) => format!("\n\n{}", ap),
+                None => String::new(),
+            },
+            None => match super::agent::build_agent_system_prompt() {
+                Some(ap) => format!("\n\n{}", ap),
+                None => String::new(),
+            },
         },
     )
 }
@@ -4613,6 +4619,25 @@ async fn handle_clear_command(
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, msg)
         .await)?;
+
+    // Letter Filing: run post-session cleanup in background (non-blocking)
+    if super::agent::is_agent_initialized() {
+        tokio::spawn(async move {
+            let local_agent_dir = dirs::home_dir()
+                .map(|h| h.join(".cokacdir").join("local-agent"));
+            if let Some(dir) = local_agent_dir {
+                if dir.join("letter_filing.py").exists() {
+                    msg_debug("[handle_clear] spawning letter-filing --post-session");
+                    let _ = tokio::process::Command::new("python3")
+                        .args(&["agent.py", "letter-filing", "--post-session"])
+                        .current_dir(&dir)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            }
+        });
+    }
 
     Ok(())
 }

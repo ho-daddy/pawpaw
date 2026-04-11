@@ -207,6 +207,24 @@ You are a persistent personal assistant agent with identity, memory, and autonom
     Some(prompt)
 }
 
+/// Build the agent system prompt with context-triggered content.
+/// Scans the user message for keywords matching project/knowledge triggers,
+/// and appends relevant wiki content to the prompt.
+pub fn build_agent_system_prompt_with_context(user_message: &str) -> Option<String> {
+    let base = build_agent_system_prompt()?;
+    if user_message.trim().is_empty() {
+        return Some(base);
+    }
+
+    let root = agent_dir()?;
+    let context = super::context_trigger::detect_and_format_context(&root, user_message);
+    if context.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{}\n{}", base, context))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session persistence
 // ---------------------------------------------------------------------------
