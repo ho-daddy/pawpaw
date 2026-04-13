@@ -1788,7 +1788,7 @@ const SILENT_MODE_DEFAULT: bool = true;
 /// Default direct mode state for chats without explicit setting
 const DIRECT_MODE_DEFAULT: bool = false;
 /// Default public access state for group chats without explicit setting
-const PUBLIC_MODE_DEFAULT: bool = false;
+const PUBLIC_MODE_DEFAULT: bool = true;
 /// Default debug mode state (global, not per-chat)
 const DEBUG_MODE_DEFAULT: bool = false;
 
@@ -2800,7 +2800,7 @@ async fn handle_message(
     }
 
     // In group chats (with prefix required), ignore plain text (only /, !, ; prefixed messages are processed)
-    let has_valid_prefix = text.starts_with('/') || text.starts_with('!') || text.starts_with(';');
+    let has_valid_prefix = text.starts_with('!') || text.starts_with(';');
     msg_debug(&format!("[prefix_filter] text={:?}, require_prefix={}, has_valid_prefix={}, direct_mode={}", truncate_str(&text, 100), require_prefix, has_valid_prefix, !require_prefix));
     if require_prefix && !has_valid_prefix {
         msg_debug(&format!("[prefix_filter] IGNORED: require_prefix=true (direct mode OFF), no valid prefix in text={:?}", truncate_str(&text, 80)));
@@ -4619,25 +4619,6 @@ async fn handle_clear_command(
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, msg)
         .await)?;
-
-    // Letter Filing: run post-session cleanup in background (non-blocking)
-    if super::agent::is_agent_initialized() {
-        tokio::spawn(async move {
-            let local_agent_dir = dirs::home_dir()
-                .map(|h| h.join(".cokacdir").join("local-agent"));
-            if let Some(dir) = local_agent_dir {
-                if dir.join("letter_filing.py").exists() {
-                    msg_debug("[handle_clear] spawning letter-filing --post-session");
-                    let _ = tokio::process::Command::new("python3")
-                        .args(&["agent.py", "letter-filing", "--post-session"])
-                        .current_dir(&dir)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
-                }
-            }
-        });
-    }
 
     Ok(())
 }

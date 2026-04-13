@@ -98,6 +98,7 @@ pub fn build_agent_system_prompt() -> Option<String> {
     let memory_raw = read("MEMORY.md");
     let agent = read("AGENT.md");
     let heartbeat = read("HEARTBEAT.md");
+    let tool = read("TOOL.md");
 
     // Truncate memory to save tokens (keep tail = most recent entries)
     let memory = truncate_keep_tail(&memory_raw, MEMORY_PROMPT_MAX_CHARS);
@@ -136,7 +137,8 @@ pub fn build_agent_system_prompt() -> Option<String> {
     //   3. SOUL                 (edited rarely)
     //   4. IDENTITY             (edited rarely)
     //   5. USER                 (updated occasionally)
-    //   6. HEARTBEAT            (updated occasionally)
+    //   6. TOOLS                (updated rarely)
+    //   7. HEARTBEAT            (updated occasionally)
     //
     //  [DYNAMIC — changes per-request or per-day, invalidates cache tail]
     //   7. MEMORY               (grows each session)
@@ -164,6 +166,9 @@ You are a persistent personal assistant agent with identity, memory, and autonom
 
 ## USER
 {user}
+
+## TOOLS
+{tool}
 
 ## HEARTBEAT
 {heartbeat}

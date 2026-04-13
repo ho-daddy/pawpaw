@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::utils::format::safe_prefix;
+
 /// Maximum characters to include from a single triggered file.
 const TRIGGER_FILE_MAX_CHARS: usize = 3_000;
 
@@ -275,7 +277,7 @@ pub fn detect_and_format_context(agent_root: &Path, user_message: &str) -> Strin
 fn format_file_section(file_path: &Path, layer: &str) -> Option<String> {
     let content = fs::read_to_string(file_path).ok()?;
     let truncated = if content.len() > TRIGGER_FILE_MAX_CHARS {
-        format!("{}...\n[truncated]", &content[..TRIGGER_FILE_MAX_CHARS])
+        format!("{}...\n[truncated]", safe_prefix(&content, TRIGGER_FILE_MAX_CHARS))
     } else {
         content
     };
